@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { runInference, type InferenceProgress } from '../core/inference/runInference';
+import { getClubDetector, runInference, type InferenceProgress } from '../core/inference/runInference';
 import type { PoseModel } from '../core/inference/pose';
 import { LM, vis } from '../core/landmarks';
 import { analyze } from '../core/pipeline';
@@ -46,6 +46,7 @@ export default function AnalyzePage() {
       if (!session) throw new Error(t('viewer.notFound'));
       const blob = await getVideo(session.video.storageKey);
       if (!blob) throw new Error(t('viewer.videoMissing'));
+      void getClubDetector().then((d) => setNoClub(!d));
 
       const out = await runInference(blob, session.video, {
         poseModel: q.pose ?? poseModel,
@@ -66,7 +67,6 @@ export default function AnalyzePage() {
         },
       });
       if (abort.signal.aborted) return;
-      setNoClub(out.modelVersions.club === 'none');
       const fd = out.frames;
       let seen = 0;
       for (let f = 0; f < fd.n; f++) if (vis(fd, f, LM.leftShoulder) > 0.3) seen++;

@@ -52,7 +52,7 @@ const zhTW = {
     cancel: '取消',
     failed: '分析失敗：{{msg}}',
     noPose: '偵測不到人物，請確認全身入鏡',
-    noClubModel: '尚未安裝桿頭模型，桿頭軌跡將以手部方向估算（虛線表示）',
+    noClubModel: '尚未安裝桿頭模型，改以影像偵測桿身來定位桿頭；偵測不到的格以手部方向估算（虛線表示）',
   },
   viewer: {
     layers: '圖層',
@@ -186,7 +186,7 @@ const zhTW = {
     labelsCount: '目前已有 {{n}} 筆標註',
     exportLabels: '匯出訓練資料（YOLO 格式）',
     clubModel: '桿頭模型',
-    clubModelNone: '未安裝（以手部方向估算）',
+    clubModelNone: '未安裝（使用影像桿身偵測）',
     about: '關於',
     aboutText: '所有影片與分析資料只存在此裝置，不會上傳到任何伺服器。',
     update: '有新版本可用',

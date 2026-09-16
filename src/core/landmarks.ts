@@ -54,6 +54,8 @@ export function sides(hand: Handedness) {
     leadElbow: rh ? LM.leftElbow : LM.rightElbow,
     leadWrist: rh ? LM.leftWrist : LM.rightWrist,
     trailWrist: rh ? LM.rightWrist : LM.leftWrist,
+    trailIndex: rh ? LM.rightIndex : LM.leftIndex,
+    trailPinky: rh ? LM.rightPinky : LM.leftPinky,
     leadIndex: rh ? LM.leftIndex : LM.rightIndex,
     leadPinky: rh ? LM.leftPinky : LM.rightPinky,
     trailHip: rh ? LM.rightHip : LM.leftHip,
@@ -87,8 +89,15 @@ export function dist(a: Pt, b: Pt): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+/** 依可見度加權平均：握桿時雙手在一起，一手被身體遮住時以另一手為主 */
+export function weightedMid(a: Pt, va: number, b: Pt, vb: number): Pt {
+  const wa = Math.max(va, 0.05) ** 2;
+  const wb = Math.max(vb, 0.05) ** 2;
+  return { x: (a.x * wa + b.x * wb) / (wa + wb), y: (a.y * wa + b.y * wb) / (wa + wb) };
+}
+
 export function handsCenter(fd: FrameData, f: number, W = 1, H = 1): Pt {
-  return mid(lm(fd, f, LM.leftWrist, W, H), lm(fd, f, LM.rightWrist, W, H));
+  return weightedMid(lm(fd, f, LM.leftWrist, W, H), vis(fd, f, LM.leftWrist), lm(fd, f, LM.rightWrist, W, H), vis(fd, f, LM.rightWrist));
 }
 
 export function hipCenter(fd: FrameData, f: number, W = 1, H = 1): Pt {

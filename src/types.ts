@@ -9,6 +9,8 @@ export const ClubSource = {
   Manual: 2,
   None: 3,
   HandEstimate: 4,
+  /** 影像桿身偵測（不需模型） */
+  Shaft: 5,
 } as const;
 export type ClubSourceValue = (typeof ClubSource)[keyof typeof ClubSource];
 

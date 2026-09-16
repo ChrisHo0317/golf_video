@@ -54,7 +54,7 @@ const en: Dict = {
     cancel: 'Cancel',
     failed: 'Analysis failed: {{msg}}',
     noPose: 'No person detected — make sure the full body is in frame',
-    noClubModel: 'Club head model not installed; club path is estimated from the hands (dashed)',
+    noClubModel: 'Club head model not installed; the club head is located by detecting the shaft in the image, with hand-direction estimates (dashed) where it is not visible',
   },
   viewer: {
     layers: 'Layers',
@@ -188,7 +188,7 @@ const en: Dict = {
     labelsCount: '{{n}} labels collected',
     exportLabels: 'Export training data (YOLO format)',
     clubModel: 'Club head model',
-    clubModelNone: 'Not installed (estimated from hands)',
+    clubModelNone: 'Not installed (using image shaft detection)',
     about: 'About',
     aboutText: 'All videos and analysis stay on this device and are never uploaded.',
     update: 'A new version is available',

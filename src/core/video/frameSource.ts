@@ -139,6 +139,7 @@ async function* decodeSamples(samples: Sample[], config: VideoDecoderConfig, opt
   });
   decoder.addEventListener('dequeue', notify);
   decoder.configure(config);
+  const waitEvent = () => new Promise<void>((r) => (wake = r));
 
   let out: ReturnType<typeof makeCanvas> | null = null;
   let size = { w: 0, h: 0 };
@@ -178,16 +179,30 @@ async function* decodeSamples(samples: Sample[], config: VideoDecoderConfig, opt
       );
       s.data = undefined; // 釋放記憶體
       while (queue.length) yield* emit(queue.shift()!);
+      // 解碼器的輸出影格有數量上限：必須先釋放佇列中的影格，佇列空了才等待，否則會互相卡住
       while (decoder.decodeQueueSize > 4 && !error) {
-        await new Promise<void>((r) => (wake = r));
-        while (queue.length) yield* emit(queue.shift()!);
+        if (queue.length) yield* emit(queue.shift()!);
+        else await waitEvent();
       }
       if (error) throw error;
     }
-    await decoder.flush();
-    // flush 後依時間排序輸出剩餘格
-    queue.sort((a, b) => a.timestamp - b.timestamp);
-    while (queue.length) yield* emit(queue.shift()!);
+    // flush 期間持續消化輸出，否則未釋放的影格會讓 flush 永遠無法完成
+    let flushed = false;
+    decoder.flush().then(
+      () => {
+        flushed = true;
+        notify();
+      },
+      (e) => {
+        error ??= e;
+        flushed = true;
+        notify();
+      },
+    );
+    while (!flushed || queue.length) {
+      if (queue.length) yield* emit(queue.shift()!);
+      else await waitEvent();
+    }
     if (error) throw error;
     if (!emitted) throw new Error('no-frames');
   } finally {

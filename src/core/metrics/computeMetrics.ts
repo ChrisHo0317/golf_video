@@ -53,7 +53,7 @@ export const SERIES_KEYS: (keyof MetricSeries)[] = [
   'xFactor',
 ];
 
-const TRUSTED_CLUB = new Set<number>([ClubSource.Model, ClubSource.Manual, ClubSource.Predicted]);
+const TRUSTED_CLUB = new Set<number>([ClubSource.Model, ClubSource.Manual, ClubSource.Predicted, ClubSource.Shaft]);
 
 export function computeSeries(ctx: MetricContext): MetricSeries {
   const { fd, phases, calibration, capture, W, H } = ctx;

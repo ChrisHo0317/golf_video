@@ -22,6 +22,8 @@ export class OneEuroFilter {
   }
 
   filter(x: number, t: number): number {
+    // 缺值不更新狀態，避免 NaN 汙染之後所有輸出
+    if (!Number.isFinite(x)) return NaN;
     if (this.xPrev === null || this.tPrev === null || t <= this.tPrev) {
       this.xPrev = x;
       this.tPrev = t;
@@ -64,7 +66,7 @@ export function fillGapsLinear(v: Float64Array, t: Float64Array, maxGapSec = Inf
   for (let i = 0; i < n; i++) {
     if (Number.isNaN(v[i])) continue;
     if (prev === -1) {
-      for (let j = 0; j < i; j++) out[j] = v[i];
+      for (let j = 0; j < i; j++) if (t[i] - t[j] <= maxGapSec) out[j] = v[i];
     } else if (i - prev > 1 && t[i] - t[prev] <= maxGapSec) {
       for (let j = prev + 1; j < i; j++) {
         const r = (t[j] - t[prev]) / (t[i] - t[prev]);
@@ -73,7 +75,7 @@ export function fillGapsLinear(v: Float64Array, t: Float64Array, maxGapSec = Inf
     }
     prev = i;
   }
-  if (prev !== -1) for (let j = prev + 1; j < n; j++) out[j] = v[prev];
+  if (prev !== -1) for (let j = prev + 1; j < n; j++) if (t[j] - t[prev] <= maxGapSec) out[j] = v[prev];
   return out;
 }
 

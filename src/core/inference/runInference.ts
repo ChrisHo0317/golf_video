@@ -1,8 +1,11 @@
 import { ClubSource, type FrameData, type VideoMeta } from '../../types';
-import { LM, N_LM } from '../landmarks';
+import { LM, N_LM, weightedMid } from '../landmarks';
 import { frameSource } from '../video/frameSource';
 import { ClubDetector, type ClubDetection } from './clubDetector';
 import { createPoseLandmarker, POSE_MODEL_VERSION, type PoseModel } from './pose';
+import { ShaftDetector } from './shaftDetector';
+
+export const SHAFT_DETECTOR_VERSION = 'shaft-cv-1';
 
 export interface InferenceProgress {
   stage: 'loading' | 'processing' | 'done';
@@ -39,6 +42,8 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
   const pose2d: number[] = [];
   const pose3d: number[] = [];
   const clubRaw: number[] = [];
+  const clubRawSrc: number[] = [];
+  const shaft = new ShaftDetector();
   let lastTs = -1;
   let lastYield = performance.now();
 
@@ -66,16 +71,25 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
         else pose3d.push(NaN, NaN, NaN);
       }
 
+      const cw = fr.canvas.width;
+      const ch = fr.canvas.height;
       let det: ClubDetection | null = null;
+      let src: number = ClubSource.None;
       if (club) {
-        const cw = fr.canvas.width;
-        const ch = fr.canvas.height;
         const roi = p ? roiFromPose(p, cw, ch) : null;
         const cands = await club.detect(fr.canvas, roi);
         det = pickCandidate(cands, p, cw, ch);
-        if (det) clubRaw.push(det.x / cw, det.y / ch, det.conf);
+        if (det) src = ClubSource.Model;
       }
-      if (!det) clubRaw.push(NaN, NaN, 0);
+      if (!det && p) {
+        // 沒有模型或模型沒抓到：以影像桿身偵測補上
+        const ctx = fr.canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
+        det = shaft.detect(ctx, cw, ch, p, (fr.mediaTime - video.trimStart) / video.slowMoFactor);
+        if (det) src = ClubSource.Shaft;
+      }
+      if (det) clubRaw.push(det.x / cw, det.y / ch, det.conf);
+      else clubRaw.push(NaN, NaN, 0);
+      clubRawSrc.push(src);
       mediaT.push(fr.mediaTime);
 
       if (performance.now() - lastYield > 100) {
@@ -91,8 +105,7 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
   const n = mediaT.length;
   const t = new Float64Array(n);
   for (let i = 0; i < n; i++) t[i] = (mediaT[i] - mediaT[0]) / video.slowMoFactor;
-  const clubRawSource = new Uint8Array(n);
-  for (let i = 0; i < n; i++) clubRawSource[i] = Number.isNaN(clubRaw[i * 3]) ? ClubSource.None : ClubSource.Model;
+  const clubRawSource = Uint8Array.from(clubRawSrc);
 
   opt.onProgress({ stage: 'done', done: n, total: n });
   return {
@@ -107,16 +120,17 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
       club: new Float32Array(n * 2).fill(NaN),
       clubSource: new Uint8Array(n).fill(ClubSource.None),
     },
-    modelVersions: { pose: `${POSE_MODEL_VERSION}-${opt.poseModel}`, club: club?.meta.version ?? 'none' },
+    modelVersions: { pose: `${POSE_MODEL_VERSION}-${opt.poseModel}`, club: club ? `${club.meta.version}+${SHAFT_DETECTOR_VERSION}` : SHAFT_DETECTOR_VERSION },
   };
 }
 
-type NLm = { x: number; y: number }[];
+type NLm = { x: number; y: number; visibility?: number }[];
 
 /** 以雙手為中心、約 5.5 倍軀幹長的正方形區域 */
 function roiFromPose(p: NLm, W: number, H: number) {
-  const hx = ((p[LM.leftWrist].x + p[LM.rightWrist].x) / 2) * W;
-  const hy = ((p[LM.leftWrist].y + p[LM.rightWrist].y) / 2) * H;
+  const h = weightedMid(p[LM.leftWrist], p[LM.leftWrist].visibility ?? 1, p[LM.rightWrist], p[LM.rightWrist].visibility ?? 1);
+  const hx = h.x * W;
+  const hy = h.y * H;
   const sx = ((p[LM.leftShoulder].x + p[LM.rightShoulder].x) / 2) * W;
   const sy = ((p[LM.leftShoulder].y + p[LM.rightShoulder].y) / 2) * H;
   const px = ((p[LM.leftHip].x + p[LM.rightHip].x) / 2) * W;
@@ -131,8 +145,9 @@ function roiFromPose(p: NLm, W: number, H: number) {
 function pickCandidate(cands: ClubDetection[], p: NLm | undefined, W: number, H: number): ClubDetection | null {
   if (!cands.length) return null;
   if (!p) return cands[0];
-  const hx = ((p[LM.leftWrist].x + p[LM.rightWrist].x) / 2) * W;
-  const hy = ((p[LM.leftWrist].y + p[LM.rightWrist].y) / 2) * H;
+  const h = weightedMid(p[LM.leftWrist], p[LM.leftWrist].visibility ?? 1, p[LM.rightWrist], p[LM.rightWrist].visibility ?? 1);
+  const hx = h.x * W;
+  const hy = h.y * H;
   const sx = ((p[LM.leftShoulder].x + p[LM.rightShoulder].x) / 2) * W;
   const sy = ((p[LM.leftShoulder].y + p[LM.rightShoulder].y) / 2) * H;
   const px = ((p[LM.leftHip].x + p[LM.rightHip].x) / 2) * W;

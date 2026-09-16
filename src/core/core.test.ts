@@ -7,7 +7,9 @@ import { detectPhases } from './phases/detectPhases';
 import { analyze } from './pipeline';
 import { rng, SYN, syntheticSwing } from './testing/synthetic';
 import { trackClub } from './tracking/clubTracker';
-import { fillGapsLinear, Kalman1D, zeroPhaseOneEuro } from './tracking/filters';
+import { fillGapsLinear, Kalman1D, OneEuroFilter, zeroPhaseOneEuro } from './tracking/filters';
+import { smoothPose } from './tracking/poseSmoothing';
+import { LM } from './landmarks';
 import { parseYolo } from './inference/clubDetector';
 
 const W = 1000;
@@ -52,6 +54,37 @@ describe('geometry', () => {
     const p = { x: 0.5, y: -1 };
     expect(signedDistAbove(p, { x: 0, y: 0 }, { x: 1, y: 0 })).toBeCloseTo(1);
     expect(signedDistAbove(p, { x: 1, y: 0 }, { x: 0, y: 0 })).toBeCloseTo(1);
+  });
+});
+
+describe('smoothPose', () => {
+  it('前導手腕長時間被遮住（低可見度）時不產生 NaN，階段仍正確', () => {
+    const fd = syntheticSwing();
+    // 0–1.8 秒左手腕可見度極低，且原始座標帶有雜訊
+    const rand = rng(7);
+    for (let f = 0; f < frameOf(1.8); f++) {
+      const o = (f * 33 + LM.leftWrist) * 4;
+      fd.pose2d[o] += (rand() - 0.5) * 0.02;
+      fd.pose2d[o + 3] = 0.03;
+    }
+    // 開頭 5 格完全沒偵測到人物
+    for (let f = 0; f < 5; f++) for (let k = 0; k < 33; k++) {
+      const o = (f * 33 + k) * 4;
+      fd.pose2d.fill(NaN, o, o + 3);
+      fd.pose2d[o + 3] = 0;
+    }
+    smoothPose(fd);
+    expect(fd.pose2d.some((v, i) => i % 4 < 2 && Number.isNaN(v))).toBe(false);
+    const p = detectPhases(fd, { W, H, useClub: false })!;
+    expect(Math.abs(p.top - frameOf(SYN.topT))).toBeLessThanOrEqual(3);
+    expect(Math.abs(p.impact - frameOf(SYN.impactT))).toBeLessThanOrEqual(3);
+  });
+
+  it('OneEuroFilter 略過 NaN 且不汙染後續輸出', () => {
+    const f = new OneEuroFilter();
+    f.filter(1, 0);
+    expect(Number.isNaN(f.filter(NaN, 0.1))).toBe(true);
+    expect(f.filter(1, 0.2)).toBeCloseTo(1);
   });
 });
 
@@ -104,6 +137,25 @@ describe('trackClub', () => {
     expect(sum / fd.n).toBeLessThan(0.01);
     expect(max).toBeLessThan(0.06);
     expect(res.coverage).toBeGreaterThan(0.7);
+  });
+
+  it('下桿整段模糊（0.25 秒無偵測）時依手臂旋轉進度內插', () => {
+    const fd = syntheticSwing();
+    const truth = Float32Array.from(fd.clubRaw);
+    for (let f = frameOf(2.03); f <= frameOf(2.27); f++) {
+      fd.clubRaw.set([NaN, NaN, 0], f * 3);
+      fd.clubRawSource[f] = ClubSource.None;
+    }
+    // 其餘格以桿身偵測來源提供
+    for (let f = 0; f < fd.n; f++) if (fd.clubRawSource[f] === ClubSource.Model) fd.clubRawSource[f] = ClubSource.Shaft;
+    const res = trackClub(fd, { W, H, handedness: 'right', fallbackLengthPx: 300 });
+    let max = 0;
+    for (let f = frameOf(2.03); f <= frameOf(2.27); f++) {
+      expect(res.clubSource[f]).toBe(ClubSource.Predicted);
+      max = Math.max(max, Math.hypot(res.club[f * 2] - truth[f * 3], res.club[f * 2 + 1] - truth[f * 3 + 1]));
+    }
+    expect(max).toBeLessThan(0.03);
+    expect(res.coverage).toBe(1);
   });
 
   it('無偵測資料時以手部方向估算', () => {
