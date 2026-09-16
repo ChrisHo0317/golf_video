@@ -1,0 +1,12 @@
+node_modules
+dist
+public/wasm
+*.local
+training/datasets
+training/runs
+training/.venv
+__pycache__
+training/app_labels
+training/*.pt
+public/models/*.task
+.claude/settings.local.json

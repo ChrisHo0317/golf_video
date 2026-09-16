@@ -1,0 +1,15 @@
+# Roboflow Universe 公開資料集（CC BY 4.0）
+# version: 留空 = 自動使用最新版本
+# 類別對應：名稱符合 head_patterns（不分大小寫）且不符合 exclude_patterns 的類別 → club_head
+head_patterns: ["club[ _-]?head", "clubhead", "^head$", "golf[ _-]?club[ _-]?head"]
+exclude_patterns: ["player", "person", "human"]
+
+datasets:
+  - workspace: golf-club-8jior
+    project: golf-club-urzzy
+  - workspace: public-bezoe
+    project: golf-club---head-object-detection
+  - workspace: jonathan-tidbury-kt5x7
+    project: golf-club-head
+  - workspace: myspace-riqj6
+    project: golf-pth94
