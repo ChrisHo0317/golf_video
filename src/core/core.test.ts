@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ClubSource, type CaptureInfo } from '../types';
+import { CAND_STRIDE, CLUB_CANDS, ClubSource, type CaptureInfo } from '../types';
 import { decodeFrames, encodeFrames, cloneFrames } from '../storage/frameCodec';
 import { calibrateByHeight } from './calibration/calibration';
 import { angle3, signedDistAbove } from './landmarks';
@@ -7,7 +7,7 @@ import { detectPhases } from './phases/detectPhases';
 import { analyze } from './pipeline';
 import { rng, SYN, syntheticSwing } from './testing/synthetic';
 import { trackClub } from './tracking/clubTracker';
-import { fillGapsLinear, Kalman1D, OneEuroFilter, zeroPhaseOneEuro } from './tracking/filters';
+import { fillGapsLinear, Kalman1D, OneEuroFilter, rtsSmoothCA, zeroPhaseOneEuro } from './tracking/filters';
 import { smoothPose } from './tracking/poseSmoothing';
 import { LM } from './landmarks';
 import { parseYolo } from './inference/clubDetector';
@@ -32,6 +32,19 @@ describe('filters', () => {
     const ramp = Float64Array.from(t, (x) => x);
     const r = zeroPhaseOneEuro(ramp, t, 1, 0.1);
     expect(Math.abs(r[50] - ramp[50])).toBeLessThan(0.01);
+  });
+
+  it('rtsSmoothCA 在缺口中依前後慣性推估（等加速度運動）', () => {
+    const n = 120;
+    const t = Float64Array.from({ length: n }, (_, i) => i / 30);
+    const truth = (x: number) => 2 + 3 * x + 4 * x * x;
+    const rand = rng(3);
+    const z = Float64Array.from(t, (x, i) => (i >= 50 && i < 70 ? NaN : truth(x) + (rand() - 0.5) * 0.02));
+    const res = rtsSmoothCA(z, new Float64Array(n).fill(0.01 ** 2), t, 1);
+    let max = 0;
+    for (let i = 50; i < 70; i++) max = Math.max(max, Math.abs(res.x[i] - truth(t[i])));
+    expect(max).toBeLessThan(0.05);
+    expect(res.v[60]).toBeCloseTo(3 + 8 * t[60], 0);
   });
 
   it('Kalman1D 追蹤等速運動', () => {
@@ -156,6 +169,30 @@ describe('trackClub', () => {
     }
     expect(max).toBeLessThan(0.03);
     expect(res.coverage).toBe(1);
+  });
+
+  it('多候選：信心值更高的干擾直線不會讓路徑跳走', () => {
+    const fd = syntheticSwing();
+    const truth = Float32Array.from(fd.clubRaw);
+    const rand = rng(11);
+    const cands = new Float32Array(fd.n * CLUB_CANDS * CAND_STRIDE).fill(NaN);
+    for (let f = 0; f < fd.n; f++) {
+      const o = f * CLUB_CANDS * CAND_STRIDE;
+      const hx = fd.pose2d[(f * 33 + 15) * 4];
+      const hy = fd.pose2d[(f * 33 + 15) * 4 + 1];
+      // 三成的格有一條信心值更高的錯誤直線（隨機方向）
+      const distract = rand() < 0.3;
+      const a = rand() * Math.PI * 2;
+      const wrong = [hx + Math.cos(a) * 0.3, hy + Math.sin(a) * 0.3, 0.9, 0];
+      const right = [truth[f * 3], truth[f * 3 + 1], 0.6, 0];
+      cands.set(distract ? [...wrong, 0, ...right, 0] : [...right, 0], o);
+      fd.clubRawSource[f] = ClubSource.Shaft;
+    }
+    fd.clubCands = cands;
+    const res = trackClub(fd, { W, H, handedness: 'right', fallbackLengthPx: 300 });
+    let sum = 0;
+    for (let f = 0; f < fd.n; f++) sum += Math.hypot(res.club[f * 2] - truth[f * 3], res.club[f * 2 + 1] - truth[f * 3 + 1]);
+    expect(sum / fd.n).toBeLessThan(0.01);
   });
 
   it('無偵測資料時以手部方向估算', () => {

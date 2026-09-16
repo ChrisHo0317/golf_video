@@ -85,6 +85,14 @@ export interface Metrics {
   clubTrackCoverage: number; // 0..1 有模型/手動資料的比例
 }
 
+export const CLUB_CANDS = 5;
+/** 每個候選：x, y, conf, flags, bgRatio（舊紀錄為 4 欄，沒有 bgRatio） */
+export const CAND_STRIDE = 5;
+/** 候選旗標：桿頭超出畫面，長度為推估值 */
+export const CAND_OUT_OF_FRAME = 1;
+/** 候選旗標：來自 YOLO 模型 */
+export const CAND_FROM_MODEL = 2;
+
 /** 逐格資料（以 TypedArray 儲存），座標為 0..1 正規化（旋轉後畫面） */
 export interface FrameData {
   n: number;
@@ -99,6 +107,8 @@ export interface FrameData {
   /** 原始（未平滑）偵測：n × 3 : x, y, conf */
   clubRaw: Float32Array;
   clubRawSource: Uint8Array;
+  /** 每格多個桿頭候選：n × CLUB_CANDS × CAND_STRIDE（舊紀錄可能沒有） */
+  clubCands?: Float32Array;
   /** 追蹤後：n × 2 : x, y */
   club: Float32Array;
   clubSource: Uint8Array;

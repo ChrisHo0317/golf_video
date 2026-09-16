@@ -1,35 +1,38 @@
-import { LM, weightedMid, type Pt } from '../landmarks';
+import { CAND_OUT_OF_FRAME } from '../../types';
+import { LM, weightedMid } from '../landmarks';
+import type { Background } from '../video/background';
 
 type NLm = { x: number; y: number; visibility?: number }[];
 
-export interface ShaftDetection {
-  /** 分析畫布像素座標 */
+export interface ShaftCandidate {
+  /** 桿頭位置（分析畫布像素座標） */
   x: number;
   y: number;
   conf: number;
   angle: number;
+  flags: number;
+  /** 同一條線在靜態背景中的強度比例（接近 1 表示是背景線） */
+  bgRatio: number;
 }
 
 const DEG = Math.PI / 180;
 const N_ANGLES = 360;
+const NMS_DEG = 10;
 
 /**
  * 不需訓練的桿身偵測：
- * 以雙手為圓心，對每個方向沿射線計算「細亮線／細暗線」的脊線強度，
- * 找出最像桿身的方向，再沿該方向找桿身末端作為桿頭位置。
- * 高速下桿時桿身會模糊，偵測不到的格交給追蹤器補點。
+ * 以雙手為圓心，對每個方向沿射線計算「細線」的脊線強度，
+ * 取幾個最強的方向作為候選，再沿各方向找桿身末端作為桿頭位置。
+ * 哪個候選才是真的桿身，交給追蹤器以整段影片的連續性判斷。
  */
 export class ShaftDetector {
-  private prevAngle: number | null = null;
-  private prevT = -1;
   private gray = new Float32Array(0);
   private score = new Float32Array(N_ANGLES);
+  private bestOffset = new Float32Array(N_ANGLES);
   /** 桿身完整在畫面內時量到的長度（相對 L），用於桿頭出界時估算 */
   private lenRatios: number[] = [];
 
   reset() {
-    this.prevAngle = null;
-    this.prevT = -1;
     this.lenRatios = [];
   }
 
@@ -39,7 +42,14 @@ export class ShaftDetector {
     return s[Math.floor(s.length * 0.6)];
   }
 
-  detect(ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D, W: number, H: number, p: NLm, time: number): ShaftDetection | null {
+  detect(
+    ctx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D,
+    W: number,
+    H: number,
+    p: NLm,
+    maxCands: number,
+    bg: Background | null = null,
+  ): ShaftCandidate[] {
     const h = weightedMid(p[LM.leftWrist], p[LM.leftWrist].visibility ?? 1, p[LM.rightWrist], p[LM.rightWrist].visibility ?? 1);
     const hx = h.x * W;
     const hy = h.y * H;
@@ -48,7 +58,7 @@ export class ShaftDetector {
     const px = ((p[LM.leftHip].x + p[LM.rightHip].x) / 2) * W;
     const py = ((p[LM.leftHip].y + p[LM.rightHip].y) / 2) * H;
     const torso = Math.hypot(sx - px, sy - py);
-    if (!Number.isFinite(torso) || torso < 20 || !Number.isFinite(hx)) return null;
+    if (!Number.isFinite(torso) || torso < 20 || !Number.isFinite(hx)) return [];
     const L = torso * 1.9; // 手到桿頭的預估距離
 
     // 讀取雙手周圍區域的灰階
@@ -59,7 +69,7 @@ export class ShaftDetector {
     const y1 = Math.min(H, Math.ceil(hy + R));
     const rw = x1 - x0;
     const rh = y1 - y0;
-    if (rw < 10 || rh < 10) return null;
+    if (rw < 10 || rh < 10) return [];
     const data = ctx.getImageData(x0, y0, rw, rh).data;
     if (this.gray.length < rw * rh) this.gray = new Float32Array(rw * rh);
     const g = this.gray;
@@ -93,36 +103,67 @@ export class ShaftDetector {
     const rIn = 0.18 * L;
     const rOut = 0.85 * L;
     const step = 1.5;
-    for (let k = 0; k < N_ANGLES; k++) {
-      const th = k * DEG;
-      if (armDirs.some((a) => Math.abs(angDiff(th, a)) < 28 * DEG)) {
-        this.score[k] = 0;
-        continue;
-      }
+    // 雙手中心的估計可能偏離實際握把數十像素，允許直線有橫向偏移
+    const OFFSETS = [0, -0.06, 0.06, -0.12, 0.12].map((v) => v * L);
+    const lineScore = (rf: typeof ridge, th: number, k: number, stepSize: number, minFrac: number, lo = 0) => {
       const dx = Math.cos(th);
       const dy = Math.sin(th);
-      let s = 0;
-      let c = 0;
       const nx = -dy;
       const ny = dx;
-      const o2 = off * 3;
-      for (let r = rIn; r <= rOut; r += step) {
-        const cx = hx + dx * r;
-        const cy = hy + dy * r;
-        const v = ridge(cx, cy, nx, ny);
+      const o2 = off * 3 * k;
+      const ox = (hx + nx * lo) * k;
+      const oy = (hy + ny * lo) * k;
+      let s = 0;
+      let c = 0;
+      for (let r = rIn * k; r <= rOut * k; r += stepSize) {
+        const cx = ox + dx * r;
+        const cy = oy + dy * r;
+        const v = rf(cx, cy, nx, ny);
         if (Number.isNaN(v)) continue;
         // 細線：中心脊線強、旁邊弱；一整片紋理（樹林、草地）旁邊也強，會被扣掉
-        const v1 = ridge(cx + nx * o2, cy + ny * o2, nx, ny);
-        const v2 = ridge(cx - nx * o2, cy - ny * o2, nx, ny);
+        const v1 = rf(cx + nx * o2, cy + ny * o2, nx, ny);
+        const v2 = rf(cx - nx * o2, cy - ny * o2, nx, ny);
         const side = Math.max(Number.isNaN(v1) ? 0 : v1, Number.isNaN(v2) ? 0 : v2);
         s += Math.max(0, v - side);
         c++;
       }
       // 射線大部分落在畫面外時不可信
-      this.score[k] = c > ((rOut - rIn) / step) * 0.6 ? s / c : 0;
+      return c > (((rOut - rIn) * k) / stepSize) * minFrac ? s / c : 0;
+    };
+    for (let k = 0; k < N_ANGLES; k++) {
+      const th = k * DEG;
+      this.score[k] = 0;
+      this.bestOffset[k] = 0;
+      if (armDirs.some((a) => Math.abs(angDiff(th, a)) < 28 * DEG)) continue;
+      for (let i = 0; i < OFFSETS.length; i++) {
+        // 偏移越大略為扣分，避免無關的平行線
+        const v = lineScore(ridge, th, 1, step, 0.6, OFFSETS[i]) * (1 - 0.04 * i);
+        if (v > this.score[k]) {
+          this.score[k] = v;
+          this.bestOffset[k] = OFFSETS[i];
+        }
+      }
     }
 
-    // 角度平滑 + 與前一格的連續性
+    // 背景影像上的同一條線
+    let bgRidge: typeof ridge | null = null;
+    if (bg) {
+      const bOff = Math.max(1, Math.round(off * bg.scale));
+      const bat = (x: number, y: number) => {
+        const xi = Math.round(x);
+        const yi = Math.round(y);
+        if (xi < 0 || yi < 0 || xi >= bg.w || yi >= bg.h) return NaN;
+        return bg.gray[yi * bg.w + xi];
+      };
+      bgRidge = (cx, cy, nx, ny) => {
+        const c = bat(cx, cy);
+        const a = bat(cx + nx * bOff, cy + ny * bOff);
+        const b = bat(cx - nx * bOff, cy - ny * bOff);
+        if (Number.isNaN(c) || Number.isNaN(a) || Number.isNaN(b)) return NaN;
+        return Math.max(0, (Math.abs(c - a) + Math.abs(c - b) - Math.abs(a - b)) / 2);
+      };
+    }
+
     const sm = new Float32Array(N_ANGLES);
     for (let k = 0; k < N_ANGLES; k++) {
       sm[k] = (this.score[(k + N_ANGLES - 1) % N_ANGLES] + 2 * this.score[k] + this.score[(k + 1) % N_ANGLES]) / 4;
@@ -136,35 +177,59 @@ export class ShaftDetector {
     mean /= N_ANGLES;
     const std = Math.sqrt(Math.max(sq / N_ANGLES - mean * mean, 1e-6));
 
-    const dt = this.prevT >= 0 ? time - this.prevT : Infinity;
-    let best = -1;
-    let bestVal = -Infinity;
+    // 取局部最大值作為候選
+    const peaks: number[] = [];
     for (let k = 0; k < N_ANGLES; k++) {
-      let v = sm[k];
-      if (this.prevAngle !== null && dt < 0.2) {
-        // 揮桿角速度上限約 2000°/s
-        const lim = Math.max(40, 2000 * dt) * DEG;
-        const d = Math.abs(angDiff(k * DEG, this.prevAngle));
-        v *= 0.6 + 0.4 / (1 + (d / lim) ** 2);
+      let isMax = sm[k] > 0;
+      for (let d = 1; d <= NMS_DEG && isMax; d++) {
+        if (sm[(k + d) % N_ANGLES] > sm[k] || sm[(k - d + N_ANGLES) % N_ANGLES] > sm[k]) isMax = false;
       }
-      if (v > bestVal) {
-        bestVal = v;
-        best = k;
-      }
+      if (isMax && (sm[k] - mean) / std > 1.5) peaks.push(k);
     }
-    const z = (sm[best] - mean) / std;
-    const conf = Math.min(1, Math.max(0, (z - 2.5) / 3));
-    if (conf <= 0) {
-      this.prevT = time;
-      return null;
-    }
+    peaks.sort((a, b) => sm[b] - sm[a]);
 
-    // 沿桿身方向找末端
-    const th = best * DEG;
+    const out: ShaftCandidate[] = [];
+    for (const k of peaks.slice(0, maxCands)) {
+      const z = (sm[k] - mean) / std;
+      const conf = Math.min(1, Math.max(0.05, (z - 1.5) / 4));
+      const th = k * DEG;
+      const lo = this.bestOffset[k];
+      const ox = hx - Math.sin(th) * lo;
+      const oy = hy + Math.cos(th) * lo;
+      const { end, outOfFrame } = this.findEnd(ridge, ox, oy, th, L, rIn, off, W, H);
+      if (!outOfFrame && out.length === 0 && conf > 0.5) {
+        this.lenRatios.push(end / L);
+        if (this.lenRatios.length > 60) this.lenRatios.shift();
+      }
+      const bgRatio = bgRidge && bg ? lineScore(bgRidge, th, bg.scale, 1, 0.3, lo) / Math.max(this.score[k], 1e-6) : 0;
+      out.push({
+        x: ox + Math.cos(th) * end,
+        y: oy + Math.sin(th) * end,
+        conf: outOfFrame ? conf * 0.85 : conf,
+        angle: th,
+        flags: outOfFrame ? CAND_OUT_OF_FRAME : 0,
+        bgRatio,
+      });
+    }
+    return out;
+  }
+
+  /** 沿桿身方向找末端；桿身一路延伸到畫面邊界時，以過去量到的桿長估算 */
+  private findEnd(
+    ridge: (cx: number, cy: number, nx: number, ny: number) => number,
+    hx: number,
+    hy: number,
+    th: number,
+    L: number,
+    rIn: number,
+    off: number,
+    W: number,
+    H: number,
+  ) {
     const dx = Math.cos(th);
     const dy = Math.sin(th);
     const prof: number[] = [];
-    let exitAt = Infinity; // 射線離開畫面的距離
+    let exitAt = Infinity;
     for (let r = 0; r <= 1.5 * L; r += 1) {
       const qx = hx + dx * r;
       const qy = hy + dy * r;
@@ -189,21 +254,8 @@ export class ShaftDetector {
       if (smooth[r] >= ref * 0.35) end = r;
       else if (r - end > 0.08 * L) break;
     }
-    let confScale = 1;
-    if (exitAt - end < 12) {
-      // 桿身一路延伸到畫面邊界：桿頭在畫面外，以過去量到的桿長估算
-      end = Math.round(Math.max(end, this.lenRatio() * L));
-      confScale = 0.8;
-    } else {
-      end = Math.min(end, Math.round(1.35 * L));
-      this.lenRatios.push(end / L);
-      if (this.lenRatios.length > 60) this.lenRatios.shift();
-    }
-
-    this.prevAngle = th;
-    this.prevT = time;
-    const head: Pt = { x: hx + dx * end, y: hy + dy * end };
-    return { x: head.x, y: head.y, conf: (0.35 + 0.5 * conf) * confScale, angle: th };
+    if (exitAt - end < 12) return { end: Math.round(Math.max(end, this.lenRatio() * L)), outOfFrame: true };
+    return { end: Math.min(end, Math.round(1.35 * L)), outOfFrame: false };
   }
 }
 

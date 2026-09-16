@@ -1,11 +1,12 @@
-import { ClubSource, type FrameData, type VideoMeta } from '../../types';
+import { CAND_FROM_MODEL, CLUB_CANDS, ClubSource, type FrameData, type VideoMeta } from '../../types';
 import { LM, N_LM, weightedMid } from '../landmarks';
+import { buildBackground } from '../video/background';
 import { frameSource } from '../video/frameSource';
 import { ClubDetector, type ClubDetection } from './clubDetector';
 import { createPoseLandmarker, POSE_MODEL_VERSION, type PoseModel } from './pose';
 import { ShaftDetector } from './shaftDetector';
 
-export const SHAFT_DETECTOR_VERSION = 'shaft-cv-1';
+export const SHAFT_DETECTOR_VERSION = 'shaft-cv-4';
 
 export interface InferenceProgress {
   stage: 'loading' | 'processing' | 'done';
@@ -43,20 +44,23 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
   const pose3d: number[] = [];
   const clubRaw: number[] = [];
   const clubRawSrc: number[] = [];
+  const cands: number[] = [];
   const shaft = new ShaftDetector();
+  const srcOpt = {
+    start: video.trimStart,
+    end: video.trimEnd,
+    rotation: video.rotation,
+    maxSide: opt.maxSide,
+    fallbackFps: video.fps,
+    signal: opt.signal,
+  };
+  const estFrames = Math.ceil((video.trimEnd - video.trimStart) * video.fps);
+  const bg = await buildBackground(file, srcOpt, estFrames).catch(() => null);
   let lastTs = -1;
   let lastYield = performance.now();
 
   try {
-    for await (const fr of frameSource(file, {
-      start: video.trimStart,
-      end: video.trimEnd,
-      rotation: video.rotation,
-      maxSide: opt.maxSide,
-      fallbackFps: video.fps,
-      stride: opt.stride,
-      signal: opt.signal,
-    })) {
+    for await (const fr of frameSource(file, { ...srcOpt, stride: opt.stride })) {
       let ts = Math.round(fr.mediaTime * 1000);
       if (ts <= lastTs) ts = lastTs + 1;
       lastTs = ts;
@@ -73,23 +77,28 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
 
       const cw = fr.canvas.width;
       const ch = fr.canvas.height;
-      let det: ClubDetection | null = null;
-      let src: number = ClubSource.None;
+      // 候選：模型偵測在前，影像桿身偵測補滿
+      const frameCands: { x: number; y: number; conf: number; flags: number; src: number; bgRatio: number }[] = [];
       if (club) {
         const roi = p ? roiFromPose(p, cw, ch) : null;
-        const cands = await club.detect(fr.canvas, roi);
-        det = pickCandidate(cands, p, cw, ch);
-        if (det) src = ClubSource.Model;
+        const found = await club.detect(fr.canvas, roi);
+        const best = pickCandidate(found, p, cw, ch);
+        if (best) frameCands.push({ ...best, flags: 0, src: ClubSource.Model, bgRatio: 0 });
+        for (const c of found) if (c !== best && frameCands.length < 2) frameCands.push({ ...c, flags: 0, src: ClubSource.Model, bgRatio: 0 });
       }
-      if (!det && p) {
-        // 沒有模型或模型沒抓到：以影像桿身偵測補上
+      if (p) {
         const ctx = fr.canvas.getContext('2d') as OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D;
-        det = shaft.detect(ctx, cw, ch, p, (fr.mediaTime - video.trimStart) / video.slowMoFactor);
-        if (det) src = ClubSource.Shaft;
+        for (const c of shaft.detect(ctx, cw, ch, p, CLUB_CANDS - frameCands.length, bg)) frameCands.push({ ...c, src: ClubSource.Shaft });
       }
-      if (det) clubRaw.push(det.x / cw, det.y / ch, det.conf);
+      const top = frameCands[0];
+      if (top) clubRaw.push(top.x / cw, top.y / ch, top.conf);
       else clubRaw.push(NaN, NaN, 0);
-      clubRawSrc.push(src);
+      clubRawSrc.push(top ? top.src : ClubSource.None);
+      for (let i = 0; i < CLUB_CANDS; i++) {
+        const c = frameCands[i];
+        if (c) cands.push(c.x / cw, c.y / ch, c.conf, c.flags | (c.src === ClubSource.Model ? CAND_FROM_MODEL : 0), c.bgRatio);
+        else cands.push(NaN, NaN, 0, 0, 0);
+      }
       mediaT.push(fr.mediaTime);
 
       if (performance.now() - lastYield > 100) {
@@ -117,6 +126,7 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
       pose3d: Float32Array.from(pose3d),
       clubRaw: Float32Array.from(clubRaw),
       clubRawSource,
+      clubCands: Float32Array.from(cands),
       club: new Float32Array(n * 2).fill(NaN),
       clubSource: new Uint8Array(n).fill(ClubSource.None),
     },

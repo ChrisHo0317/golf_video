@@ -1,6 +1,6 @@
 import type { FrameData } from '../types';
 
-const KEYS = ['t', 'mediaT', 'pose2d', 'pose3d', 'clubRaw', 'clubRawSource', 'club', 'clubSource'] as const;
+const KEYS = ['t', 'mediaT', 'pose2d', 'pose3d', 'clubRaw', 'clubRawSource', 'club', 'clubSource', 'clubCands'] as const;
 type Key = (typeof KEYS)[number];
 type TA = Float64Array | Float32Array | Uint8Array;
 const CTORS = { Float64Array, Float32Array, Uint8Array } as const;
@@ -21,7 +21,8 @@ export async function encodeFrames(fd: FrameData): Promise<Blob> {
   const arrays: Header['arrays'] = [];
   let offset = 0;
   for (const key of KEYS) {
-    const a = fd[key] as TA;
+    const a = fd[key] as TA | undefined;
+    if (!a) continue;
     arrays.push({ key, type: a.constructor.name as keyof typeof CTORS, offset, length: a.length });
     offset += a.byteLength;
   }
@@ -55,6 +56,9 @@ export async function decodeFrames(blob: Blob): Promise<FrameData> {
 
 export function cloneFrames(fd: FrameData): FrameData {
   const out = { n: fd.n } as FrameData;
-  for (const k of KEYS) (out as unknown as Record<Key, TA>)[k] = (fd[k] as TA).slice();
+  for (const k of KEYS) {
+    const a = fd[k] as TA | undefined;
+    if (a) (out as unknown as Record<Key, TA>)[k] = a.slice();
+  }
   return out;
 }
