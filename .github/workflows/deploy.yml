@@ -42,5 +42,9 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # 若 Pages 仍設定為「從分支部署」，內建的 pages build 會同時發布原始碼；
+      # 等它完成後再部署，確保建置後的網站覆蓋上去（Source 改為 GitHub Actions 後可移除）
+      - name: Wait for legacy pages build
+        run: sleep 90
       - id: deployment
         uses: actions/deploy-pages@v4
