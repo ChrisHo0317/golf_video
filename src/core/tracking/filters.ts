@@ -314,3 +314,42 @@ export function rtsSmoothCA(z: ArrayLike<number>, R: ArrayLike<number>, t: Array
   for (let i = last + 1; i < n; i++) x[i] = x[last];
   return { x, v, varX, first, last };
 }
+
+/**
+ * 時間域高斯平滑（零相位，適用不等間距取樣）
+ * @param weight 每個取樣的權重（例如手動標記給很大的權重以保持原值）
+ */
+export function gaussianSmooth(
+  v: ArrayLike<number>,
+  t: ArrayLike<number>,
+  sigma: number | ArrayLike<number>,
+  weight?: ArrayLike<number>,
+): Float64Array {
+  const n = v.length;
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    // sigma 可以是每個取樣各自的值（自適應平滑）
+    const sigmaSec = typeof sigma === 'number' ? sigma : sigma[i];
+    const reach = sigmaSec * 3;
+    if (!Number.isFinite(v[i])) {
+      out[i] = v[i];
+      continue;
+    }
+    let s = 0;
+    let ws = 0;
+    for (let j = i; j >= 0 && t[i] - t[j] <= reach; j--) {
+      if (!Number.isFinite(v[j])) continue;
+      const g = Math.exp(-0.5 * ((t[i] - t[j]) / sigmaSec) ** 2) * (weight ? weight[j] : 1);
+      s += g * v[j];
+      ws += g;
+    }
+    for (let j = i + 1; j < n && t[j] - t[i] <= reach; j++) {
+      if (!Number.isFinite(v[j])) continue;
+      const g = Math.exp(-0.5 * ((t[j] - t[i]) / sigmaSec) ** 2) * (weight ? weight[j] : 1);
+      s += g * v[j];
+      ws += g;
+    }
+    out[i] = ws > 0 ? s / ws : v[i];
+  }
+  return out;
+}

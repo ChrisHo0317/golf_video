@@ -68,8 +68,12 @@ export function renderOverlay(inp: RenderInput) {
   const rect = containRect(cssW, cssH, W, H);
   const scale = (rect.w / W) * inp.zoom.k;
   const frame = Math.max(0, Math.min(fd.n - 1, inp.frame));
-  const from = 0;
-  const to = inp.trailMode === 'full' ? fd.n - 1 : frame;
+  // 軌跡只畫揮桿本身（準備 → 收桿後 0.3 秒），排除準備前的晃桿與收桿後放下球桿的動作
+  const { phases } = inp.result;
+  const fps = fd.n > 1 ? (fd.n - 1) / Math.max(fd.t[fd.n - 1] - fd.t[0], 1e-6) : 30;
+  const from = phases.address;
+  const end = Math.min(fd.n - 1, phases.finish + Math.round(fps * 0.3));
+  const to = inp.trailMode === 'full' ? end : Math.min(frame, end);
 
   for (const layer of LAYERS) {
     const style = inp.layers[layer.id];

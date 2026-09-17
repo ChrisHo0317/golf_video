@@ -1,6 +1,6 @@
 import { CAND_FROM_MODEL, CAND_OUT_OF_FRAME, CLUB_CANDS, ClubSource, type FrameData, type Handedness } from '../../types';
 import { LM, dist, handsCenter, lm, mid, shoulderCenter, sides, vis, type Pt } from '../landmarks';
-import { rtsSmoothCA } from './filters';
+import { gaussianSmooth, rtsSmoothCA } from './filters';
 
 export interface ClubTrackOptions {
   W: number;
@@ -45,6 +45,11 @@ const SIGMA_MEAS = 4 * DEG;
 const Q_PSI = (1500 * DEG * 30) ** 2;
 /** 桿身絕對角度的過程雜訊強度：甩桿時角速度變化比手腕角更劇烈 */
 const Q_THETA = (6000 * DEG * 30) ** 2;
+/** 輸出軌跡的平滑強度（秒）：高速段保留真實動作，慢速段（準備、頂點、收桿）加強平滑 */
+const SMOOTH_ANGLE_FAST = 0.03;
+const SMOOTH_ANGLE_SLOW = 0.12;
+const SMOOTH_LEN_FAST = 0.06;
+const SMOOTH_LEN_SLOW = 0.15;
 /** 桿長比例的過程雜訊強度 */
 const Q_LEN = 400;
 
@@ -255,6 +260,10 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     if (measSrc[f] !== ClubSource.None) next = f;
     nextMeas[f] = next;
   }
+  // 先決定每格的角度與長度，再整體平滑，避免在不同模型間切換造成的鋸齒
+  const thetaF = new Float64Array(n);
+  const rF = new Float64Array(n);
+  const pin = new Float64Array(n).fill(1);
   let covered = 0;
   for (let f = 0; f < n; f++) {
     const prev = prevMeas[f];
@@ -265,7 +274,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     else label = ClubSource.HandEstimate;
 
     const lenRatio = Number.isFinite(lenSm.x[f]) ? lenSm.x[f] : 0.95;
-    const r = Math.min(1.5, Math.max(0.35, lenRatio)) * L;
+    let r = Math.min(1.5, Math.max(0.35, lenRatio)) * L;
     let theta = arm[f] + sm.x[f];
     if (label !== ClubSource.Predicted && label !== ClubSource.HandEstimate) {
       // 有量測的格：採用擬合較好的模型；兩個模型都跟不上時直接用量測值
@@ -281,15 +290,43 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       const est = handDirection(fd, f, W, H, s);
       if (nearest > interpGapSec / 2 && Number.isFinite(est)) theta = est;
     }
-    if (label !== ClubSource.HandEstimate) covered++;
     if (label === ClubSource.Manual) {
-      club[f * 2] = fd.clubRaw[f * 3];
-      club[f * 2 + 1] = fd.clubRaw[f * 3 + 1];
-    } else {
-      club[f * 2] = (hands[f].x + Math.cos(theta) * r) / W;
-      club[f * 2 + 1] = (hands[f].y + Math.sin(theta) * r) / H;
+      const mx = fd.clubRaw[f * 3] * W;
+      const my = fd.clubRaw[f * 3 + 1] * H;
+      theta = Math.atan2(my - hands[f].y, mx - hands[f].x);
+      r = Math.hypot(mx - hands[f].x, my - hands[f].y);
+      pin[f] = 1e6;
     }
+    // 角度連續化
+    thetaF[f] = f > 0 ? thetaF[f - 1] + wrap(theta - thetaF[f - 1]) : theta;
+    rF[f] = r;
+    if (label !== ClubSource.HandEstimate) covered++;
     src[f] = label;
+  }
+
+  // 自適應高斯平滑：依雙手速度（前後各取鄰近最大值，避免在加速起點過度平滑）決定強度
+  const sigA = new Float64Array(n);
+  const sigL = new Float64Array(n);
+  const reachFrames = Math.max(1, Math.round(fps * 0.05));
+  // 桿身角速度（每秒 600° 視為高速）
+  const angFast = new Float64Array(n);
+  for (let f = 0; f < n; f++) {
+    const a = Math.max(0, f - 1);
+    const b = Math.min(n - 1, f + 1);
+    angFast[f] = Math.abs(thetaF[b] - thetaF[a]) / Math.max(t[b] - t[a], 1e-6) / (600 * DEG);
+  }
+  for (let f = 0; f < n; f++) {
+    let sp = 0;
+    for (let j = Math.max(0, f - reachFrames); j <= Math.min(n - 1, f + reachFrames); j++) sp = Math.max(sp, speedNorm[j], angFast[j]);
+    const slow = Math.max(0, Math.min(1, (0.5 - sp) / 0.4));
+    sigA[f] = SMOOTH_ANGLE_FAST + (SMOOTH_ANGLE_SLOW - SMOOTH_ANGLE_FAST) * slow;
+    sigL[f] = SMOOTH_LEN_FAST + (SMOOTH_LEN_SLOW - SMOOTH_LEN_FAST) * slow;
+  }
+  const thetaS = gaussianSmooth(thetaF, t, sigA, pin);
+  const rS = gaussianSmooth(rF, t, sigL, pin);
+  for (let f = 0; f < n; f++) {
+    club[f * 2] = (hands[f].x + Math.cos(thetaS[f]) * rS[f]) / W;
+    club[f * 2 + 1] = (hands[f].y + Math.sin(thetaS[f]) * rS[f]) / H;
   }
   return { club, clubSource: src, lengthPx: L, coverage: n ? covered / n : 0 };
 }

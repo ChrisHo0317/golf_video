@@ -11,6 +11,7 @@ import { fillGapsLinear, Kalman1D, OneEuroFilter, rtsSmoothCA, zeroPhaseOneEuro 
 import { smoothPose } from './tracking/poseSmoothing';
 import { LM } from './landmarks';
 import { parseYolo } from './inference/clubDetector';
+import { catmullRom } from '../overlay/layers';
 
 const W = 1000;
 const H = 1000;
@@ -60,6 +61,19 @@ describe('filters', () => {
 });
 
 describe('geometry', () => {
+  it('catmullRom 通過兩端點且落在中間', () => {
+    const p = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 1 }, { x: 3, y: 3 }];
+    const a = catmullRom(p[0], p[1], p[2], p[3], 0);
+    const b = catmullRom(p[0], p[1], p[2], p[3], 1);
+    const m = catmullRom(p[0], p[1], p[2], p[3], 0.5);
+    expect(a.x).toBeCloseTo(1);
+    expect(a.y).toBeCloseTo(0);
+    expect(b.x).toBeCloseTo(2);
+    expect(b.y).toBeCloseTo(1);
+    expect(m.x).toBeGreaterThan(1);
+    expect(m.x).toBeLessThan(2);
+  });
+
   it('angle3', () => {
     expect(angle3({ x: 1, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 1 })).toBeCloseTo(90);
   });
@@ -193,6 +207,30 @@ describe('trackClub', () => {
     let sum = 0;
     for (let f = 0; f < fd.n; f++) sum += Math.hypot(res.club[f * 2] - truth[f * 3], res.club[f * 2 + 1] - truth[f * 3 + 1]);
     expect(sum / fd.n).toBeLessThan(0.01);
+  });
+
+  it('有雜訊時輸出軌跡平滑（二階差分遠小於量測）', () => {
+    const fd = syntheticSwing();
+    const rand = rng(21);
+    const jag = (arr: ArrayLike<number>, stride: number) => {
+      let sum = 0;
+      for (let f = 1; f < fd.n - 1; f++) {
+        const ax = arr[(f + 1) * stride] - 2 * arr[f * stride] + arr[(f - 1) * stride];
+        const ay = arr[(f + 1) * stride + 1] - 2 * arr[f * stride + 1] + arr[(f - 1) * stride + 1];
+        sum += Math.hypot(ax, ay);
+      }
+      return sum / (fd.n - 2);
+    };
+    const clean = jag(fd.clubRaw, 3);
+    for (let f = 0; f < fd.n; f++) {
+      fd.clubRaw[f * 3] += (rand() - 0.5) * 0.01;
+      fd.clubRaw[f * 3 + 1] += (rand() - 0.5) * 0.01;
+    }
+    const noisy = jag(fd.clubRaw, 3);
+    const res = trackClub(fd, { W, H, handedness: 'right', fallbackLengthPx: 300 });
+    const out = jag(res.club, 2);
+    expect(out).toBeLessThan(noisy * 0.5);
+    expect(out).toBeLessThan(clean * 2 + 0.002);
   });
 
   it('無偵測資料時以手部方向估算', () => {

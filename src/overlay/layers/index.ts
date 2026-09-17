@@ -43,6 +43,46 @@ function polyline(ctx: CanvasRenderingContext2D, pts: (Pt | null)[]) {
   ctx.stroke();
 }
 
+/** 向心 Catmull-Rom 樣條：p1→p2 之間的點（u ∈ [0,1]） */
+export function catmullRom(p0: Pt, p1: Pt, p2: Pt, p3: Pt, u: number): Pt {
+  const knot = (a: Pt, b: Pt) => Math.max(Math.sqrt(Math.hypot(b.x - a.x, b.y - a.y)), 1e-4);
+  const t1 = knot(p0, p1);
+  const t2 = t1 + knot(p1, p2);
+  const t3 = t2 + knot(p2, p3);
+  const t = t1 + (t2 - t1) * u;
+  const lerp = (a: Pt, b: Pt, ta: number, tb: number): Pt => {
+    const w = (t - ta) / (tb - ta);
+    return { x: a.x + (b.x - a.x) * w, y: a.y + (b.y - a.y) * w };
+  };
+  const a1 = lerp(p0, p1, 0, t1);
+  const a2 = lerp(p1, p2, t1, t2);
+  const a3 = lerp(p2, p3, t2, t3);
+  const b1 = lerp(a1, a2, 0, t2);
+  const b2 = lerp(a2, a3, t1, t3);
+  return lerp(b1, b2, t1, t2);
+}
+
+const SPLINE_STEPS = 8;
+
+/** 以樣條曲線畫出平滑軌跡；style(i) 可為每一段設定顏色／虛線 */
+function smoothPath(ctx: CanvasRenderingContext2D, pts: (Pt | null)[], style?: (i: number) => void) {
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    if (!p1 || !p2) continue;
+    const p0 = pts[i - 1] ?? p1;
+    const p3 = pts[i + 2] ?? p2;
+    style?.(i + 1);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    for (let k = 1; k <= SPLINE_STEPS; k++) {
+      const q = catmullRom(p0, p1, p2, p3, k / SPLINE_STEPS);
+      ctx.lineTo(q.x, q.y);
+    }
+    ctx.stroke();
+  }
+}
+
 function trail(dc: DrawContext, get: (f: number) => Pt | null) {
   const pts: (Pt | null)[] = [];
   for (let f = dc.from; f <= dc.to; f++) pts.push(get(f));
@@ -120,18 +160,13 @@ const clubPath: LayerDef = {
       const speed = result.series.clubSpeed;
       let vmax = 0;
       for (let f = 0; f < fd.n; f++) if (speed[f] > vmax) vmax = speed[f];
-      for (let f = dc.from + 1; f <= dc.to; f++) {
-        const a = clubPt(fd, f - 1, W, H);
-        const b = clubPt(fd, f, W, H);
-        if (!a || !b) continue;
+      const pts = trail(dc, (f) => clubPt(fd, f, W, H));
+      smoothPath(ctx, pts, (i) => {
+        const f = dc.from + i;
         const est = fd.clubSource[f] === ClubSource.HandEstimate;
         ctx.setLineDash(est ? [dc.px(4), dc.px(4)] : []);
         ctx.strokeStyle = Number.isNaN(speed[f]) ? dc.style.color : speedColor(speed[f], vmax);
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.stroke();
-      }
+      });
       ctx.setLineDash([]);
       const c = clubPt(fd, dc.frame, W, H);
       if (c) {
@@ -168,7 +203,7 @@ const handPath: LayerDef = {
   defaultStyle: { color: '#29b6f6', width: 2.5, opacity: 0.9 },
   draw: (dc) =>
     withStyle(dc, (ctx) => {
-      polyline(ctx, trail(dc, (f) => handsCenter(dc.fd, f, dc.W, dc.H)));
+      smoothPath(ctx, trail(dc, (f) => handsCenter(dc.fd, f, dc.W, dc.H)));
       dot(ctx, handsCenter(dc.fd, dc.frame, dc.W, dc.H), dc.px(4));
     }),
 };
