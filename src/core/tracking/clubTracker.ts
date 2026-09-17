@@ -264,12 +264,29 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   const thetaF = new Float64Array(n);
   const rF = new Float64Array(n);
   const pin = new Float64Array(n).fill(1);
+  // 最近的人工標記：人工標記夾住的短缺口，以標記內插為準（忽略期間的自動偵測）
+  const prevManual = new Int32Array(n).fill(-1);
+  const nextManual = new Int32Array(n).fill(-1);
+  for (let f = 0, last = -1; f < n; f++) {
+    if (measSrc[f] === ClubSource.Manual) last = f;
+    prevManual[f] = last;
+  }
+  for (let f = n - 1, next = -1; f >= 0; f--) {
+    if (measSrc[f] === ClubSource.Manual) next = f;
+    nextManual[f] = next;
+  }
   let covered = 0;
   for (let f = 0; f < n; f++) {
-    const prev = prevMeas[f];
-    const next = nextMeas[f];
+    let prev = prevMeas[f];
+    let next = nextMeas[f];
     let label: number;
-    if (measSrc[f] !== ClubSource.None) label = measSrc[f];
+    const betweenManual =
+      measSrc[f] !== ClubSource.Manual && prevManual[f] >= 0 && nextManual[f] >= 0 && t[nextManual[f]] - t[prevManual[f]] <= interpGapSec;
+    if (betweenManual) {
+      prev = prevManual[f];
+      next = nextManual[f];
+      label = ClubSource.Predicted;
+    } else if (measSrc[f] !== ClubSource.None) label = measSrc[f];
     else if (prev >= 0 && next >= 0 && t[next] - t[prev] <= interpGapSec) label = ClubSource.Predicted;
     else label = ClubSource.HandEstimate;
 
@@ -281,6 +298,13 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       const res = residual(f);
       if (res.abs > 10 * DEG) theta = zTheta[f];
       else if (!res.psiBetter) theta = thSm.x[f];
+    } else if (label === ClubSource.Predicted && measSrc[prev] === ClubSource.Manual && measSrc[next] === ClubSource.Manual) {
+      // 前後都是人工標記：在兩個實際位置之間依時間線性內插角度與長度，避免慣性模型過衝
+      const u = (t[f] - t[prev]) / Math.max(t[next] - t[prev], 1e-6);
+      theta = zTheta[prev] + (zTheta[next] - zTheta[prev]) * u;
+      const rp = zLen[prev] * L;
+      const rn = zLen[next] * L;
+      if (Number.isFinite(rp) && Number.isFinite(rn)) r = rp + (rn - rp) * u;
     } else if (label === ClubSource.Predicted && Math.abs(zPsi[next] - zPsi[prev]) > 30 * DEG) {
       // 缺口前後手腕角變化大：桿身不是跟著手臂轉，改用絕對角度的慣性推估
       theta = thSm.x[f];
@@ -325,6 +349,12 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   const thetaS = gaussianSmooth(thetaF, t, sigA, pin);
   const rS = gaussianSmooth(rF, t, sigL, pin);
   for (let f = 0; f < n; f++) {
+    if (src[f] === ClubSource.Manual) {
+      // 人工標記是實際位置，不做平滑
+      club[f * 2] = fd.clubRaw[f * 3];
+      club[f * 2 + 1] = fd.clubRaw[f * 3 + 1];
+      continue;
+    }
     club[f * 2] = (hands[f].x + Math.cos(thetaS[f]) * rS[f]) / W;
     club[f * 2 + 1] = (hands[f].y + Math.sin(thetaS[f]) * rS[f]) / H;
   }

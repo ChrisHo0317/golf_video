@@ -233,6 +233,35 @@ describe('trackClub', () => {
     expect(out).toBeLessThan(clean * 2 + 0.002);
   });
 
+  it('手動標記的格輸出完全等於標記位置', () => {
+    const fd = syntheticSwing();
+    // 連續標記在高速段，且故意偏離模型路徑
+    for (let f = frameOf(2.1); f <= frameOf(2.3); f++) {
+      fd.clubRaw[f * 3] += 0.03;
+      fd.clubRawSource[f] = ClubSource.Manual;
+    }
+    const res = trackClub(fd, { W, H, handedness: 'right', fallbackLengthPx: 300 });
+    for (let f = frameOf(2.1); f <= frameOf(2.3); f++) {
+      expect(res.club[f * 2]).toBeCloseTo(fd.clubRaw[f * 3], 6);
+      expect(res.club[f * 2 + 1]).toBeCloseTo(fd.clubRaw[f * 3 + 1], 6);
+    }
+  });
+
+  it('人工標記之間的錯誤自動偵測被忽略，改以標記內插', () => {
+    const fd = syntheticSwing();
+    const a = frameOf(1.5);
+    const b = frameOf(1.6);
+    fd.clubRawSource[a] = ClubSource.Manual;
+    fd.clubRawSource[b] = ClubSource.Manual;
+    // 中間放一個離譜的偵測
+    const mid = (a + b) >> 1;
+    fd.clubRaw.set([0.95, 0.95, 1], mid * 3);
+    const res = trackClub(fd, { W, H, handedness: 'right', fallbackLengthPx: 300 });
+    expect(res.clubSource[mid]).toBe(ClubSource.Predicted);
+    const truth = syntheticSwing().clubRaw;
+    expect(Math.hypot(res.club[mid * 2] - truth[mid * 3], res.club[mid * 2 + 1] - truth[mid * 3 + 1])).toBeLessThan(0.02);
+  });
+
   it('無偵測資料時以手部方向估算', () => {
     const fd = syntheticSwing();
     fd.clubRawSource.fill(ClubSource.None);
