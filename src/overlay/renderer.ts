@@ -44,7 +44,7 @@ export function defaultLayerSettings(): LayerSettings {
 
 export const PRESETS: Record<string, LayerId[]> = {
   beginner: ['skeleton', 'clubPath', 'clubShaft', 'phaseMarkers'],
-  plane: ['swingPlane', 'clubPath', 'clubShaft', 'handPath', 'phaseMarkers'],
+  plane: ['swingPlane', 'clubPath', 'clubShaft', 'clubInertia', 'handPath', 'phaseMarkers'],
   body: ['skeleton', 'spineAngle', 'hipPath', 'headPath', 'rotationGauge'],
   all: LAYERS.map((l) => l.id).filter((id) => id !== 'grid'),
 };

@@ -80,10 +80,12 @@ const en: Dict = {
     videoMissing: 'Original video is missing',
     notesPlaceholder: 'How did this swing feel? Ball flight?',
     title: 'Title',
+    predictError: 'pred. error',
   },
   layer: {
     skeleton: 'Skeleton',
     clubPath: 'Club head path',
+    clubInertia: 'Club inertia prediction',
     clubShaft: 'Shaft line',
     handPath: 'Hand path',
     headPath: 'Head movement',

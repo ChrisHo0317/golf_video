@@ -4,6 +4,7 @@ import type { CaptureInfo, FrameData, ViewAngle } from '../types';
 export type LayerId =
   | 'skeleton'
   | 'clubPath'
+  | 'clubInertia'
   | 'clubShaft'
   | 'handPath'
   | 'headPath'

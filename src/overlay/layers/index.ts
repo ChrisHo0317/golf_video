@@ -10,6 +10,7 @@ import {
   vis,
   type Pt,
 } from '../../core/landmarks';
+import { predictNext } from '../../core/tracking/inertia';
 import { ClubSource, type Phases } from '../../types';
 import type { DrawContext, LayerDef, LayerId } from '../types';
 
@@ -102,10 +103,13 @@ function label(dc: DrawContext, text: string, p: Pt, color = '#fff') {
   ctx.font = `600 ${dc.px(12)}px system-ui, sans-serif`;
   const w = ctx.measureText(text).width;
   const pad = dc.px(4);
+  // 限制在影片畫面內，避免被切掉
+  const x = Math.max(pad, Math.min(p.x, dc.W - w - pad));
+  const y = Math.max(dc.px(16), Math.min(p.y, dc.H - dc.px(6)));
   ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.fillRect(p.x - pad, p.y - dc.px(14), w + pad * 2, dc.px(18));
+  ctx.fillRect(x - pad, y - dc.px(14), w + pad * 2, dc.px(18));
   ctx.fillStyle = color;
-  ctx.fillText(text, p.x, p.y);
+  ctx.fillText(text, x, y);
   ctx.restore();
 }
 
@@ -178,6 +182,61 @@ const clubPath: LayerDef = {
         ctx.fill();
         ctx.stroke();
       }
+    }),
+};
+
+/** 慣性預測：以目前與前兩格的桿頭位置計算速度、加速度，外推下一格 */
+const clubInertia: LayerDef = {
+  id: 'clubInertia',
+  defaultOn: true,
+  views: [...all],
+  defaultStyle: { color: '#ff4081', width: 2.5, opacity: 0.95 },
+  draw: (dc) =>
+    withStyle(dc, (ctx) => {
+      const { fd, W, H, frame: f } = dc;
+      if (f < 2 || f >= fd.n) return;
+      const pts: (Pt | null)[] = [];
+      const hands: Pt[] = [];
+      for (let g = f - 2; g <= f; g++) {
+        pts[g] = clubPt(fd, g, W, H);
+        hands[g] = handsCenter(fd, g, W, H);
+      }
+      const dtNext = f + 1 < fd.n ? fd.t[f + 1] - fd.t[f] : undefined;
+      const st = predictNext(pts, hands, fd.t, f, 'cartAccel', dtNext);
+      const cur = pts[f];
+      if (!st || !cur) return;
+      // 速度箭頭（顯示 0.1 秒的移動量）
+      const k = 0.1;
+      const tip = { x: cur.x + st.vx * k, y: cur.y + st.vy * k };
+      ctx.beginPath();
+      ctx.moveTo(cur.x, cur.y);
+      ctx.lineTo(tip.x, tip.y);
+      ctx.stroke();
+      const ang = Math.atan2(tip.y - cur.y, tip.x - cur.x);
+      const hl = dc.px(9);
+      ctx.beginPath();
+      ctx.moveTo(tip.x, tip.y);
+      ctx.lineTo(tip.x - hl * Math.cos(ang - 0.45), tip.y - hl * Math.sin(ang - 0.45));
+      ctx.lineTo(tip.x - hl * Math.cos(ang + 0.45), tip.y - hl * Math.sin(ang + 0.45));
+      ctx.closePath();
+      ctx.fill();
+      // 預測的下一格位置（虛線圓）與連線
+      ctx.setLineDash([dc.px(4), dc.px(3)]);
+      ctx.beginPath();
+      ctx.moveTo(cur.x, cur.y);
+      ctx.lineTo(st.next.x, st.next.y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(st.next.x, st.next.y, dc.px(8), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const ppm = dc.result.calibration.pxPerMeter;
+      const speed = Math.hypot(st.vx, st.vy) / ppm;
+      const accel = Math.hypot(st.ax, st.ay) / ppm;
+      let text = `${speed.toFixed(1)} m/s · ${accel.toFixed(0)} m/s²`;
+      const actual = f + 1 < fd.n ? clubPt(fd, f + 1, W, H) : null;
+      if (actual) text += ` · ${dc.t('viewer.predictError')} ${((Math.hypot(actual.x - st.next.x, actual.y - st.next.y) / ppm) * 100).toFixed(0)} cm`;
+      label(dc, text, { x: st.next.x + dc.px(12), y: st.next.y + dc.px(4) }, dc.style.color);
     }),
 };
 
@@ -425,6 +484,7 @@ export const LAYERS: LayerDef[] = [
   handPath,
   clubShaft,
   clubPath,
+  clubInertia,
   phaseMarkers,
   rotationGauge,
 ];

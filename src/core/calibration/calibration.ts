@@ -12,8 +12,8 @@ export const DEFAULT_CLUB_LENGTH_CM: Record<ClubType, number> = {
 
 /** 人體比例（Drillis & Contini）：大腿 0.245H、小腿 0.246H、髖至肩 0.29H */
 const LEG_TORSO_RATIO = 0.245 + 0.246 + 0.29;
-/** 握把到手部中心的長度約 0.15 公尺 */
-const GRIP_OFFSET_M = 0.15;
+/** 雙手（手腕）中心到握把末端的沿桿距離約 0.10 公尺（以人工標記的影片實測） */
+const GRIP_OFFSET_M = 0.1;
 
 /** 以身高換算：取準備姿勢附近多格的腿長 + 軀幹長中位數 */
 export function calibrateByHeight(fd: FrameData, address: number, heightCm: number, W: number, H: number): Calibration | null {

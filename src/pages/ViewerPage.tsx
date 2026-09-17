@@ -279,7 +279,7 @@ export default function ViewerPage() {
   // ---- 鍵盤 ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest('input, textarea, select')) return;
+      if ((e.target as HTMLElement | null)?.closest?.('input, textarea, select')) return;
       if (e.key === 'ArrowLeft') seekFrame(frame - 1);
       else if (e.key === 'ArrowRight') seekFrame(frame + 1);
       else if (e.key === ' ') {

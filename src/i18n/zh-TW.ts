@@ -78,10 +78,12 @@ const zhTW = {
     videoMissing: '原始影片已不存在',
     notesPlaceholder: '記錄這次揮桿的感覺、球的方向…',
     title: '標題',
+    predictError: '預測誤差',
   },
   layer: {
     skeleton: '人體骨架',
     clubPath: '桿頭軌跡',
+    clubInertia: '桿頭慣性預測',
     clubShaft: '桿身線',
     handPath: '手部軌跡',
     headPath: '頭部位移',

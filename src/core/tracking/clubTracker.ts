@@ -11,6 +11,10 @@ export interface ClubTrackOptions {
   minConf?: number;
   /** 超過此秒數的缺口視為無資料（改以手部方向估算） */
   interpGapSec?: number;
+  /** 路徑選擇是否使用慣性外推（預設開啟） */
+  useInertia?: boolean;
+  /** 有慣性歷史時，非慣性運動模型的額外成本 */
+  inertiaBias?: number;
 }
 
 export interface ClubTrackResult {
@@ -21,6 +25,9 @@ export interface ClubTrackResult {
 }
 
 interface Cand {
+  /** 桿頭位置（px） */
+  x: number;
+  y: number;
   /** 桿身相對手臂的角度（手腕屈伸角），弧度 */
   psi: number;
   theta: number;
@@ -45,9 +52,11 @@ const SIGMA_MEAS = 4 * DEG;
 const Q_PSI = (1500 * DEG * 30) ** 2;
 /** 桿身絕對角度的過程雜訊強度：甩桿時角速度變化比手腕角更劇烈 */
 const Q_THETA = (6000 * DEG * 30) ** 2;
+/** 有慣性歷史時，非慣性運動模型的額外成本 */
+const INERTIA_BIAS = 1.5;
 /** 輸出軌跡的平滑強度（秒）：高速段保留真實動作，慢速段（準備、頂點、收桿）加強平滑 */
 const SMOOTH_ANGLE_FAST = 0.03;
-const SMOOTH_ANGLE_SLOW = 0.12;
+const SMOOTH_ANGLE_SLOW = 0.08;
 const SMOOTH_LEN_FAST = 0.06;
 const SMOOTH_LEN_SLOW = 0.15;
 /** 桿長比例的過程雜訊強度 */
@@ -150,11 +159,12 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     const c = rawCands[f][0];
     if (c && !(c.flags & CAND_OUT_OF_FRAME) && (c.src === ClubSource.Manual || c.conf >= 0.5)) ds.push(dist(c, hands[f]));
   }
+  // 影像偵測的桿身末端常因對比不足而偏短，因此桿長不低於依身高換算的理論值
   let L = opt.fallbackLengthPx;
   if (ds.length >= 5) {
     ds.sort((a, b) => a - b);
     // 取較高分位：桿身與畫面平行時距離最長，最接近真實桿長
-    L = ds[Math.floor(ds.length * 0.75)];
+    L = Math.max(L, ds[Math.floor(ds.length * 0.75)]);
   }
 
   const cands: Cand[][] = rawCands.map((list, f) => {
@@ -166,14 +176,14 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       const oof = (c.flags & CAND_OUT_OF_FRAME) !== 0;
       if (!manual && !oof && (r < 0.35 * L || r > 1.5 * L)) continue;
       const theta = Math.atan2(c.y - hands[f].y, c.x - hands[f].x);
-      out.push({ psi: wrap(theta - arm[f]), theta, r, conf: c.conf, oof, src: c.src });
+      out.push({ x: c.x, y: c.y, psi: wrap(theta - arm[f]), theta, r, conf: c.conf, oof, src: c.src });
     }
     return out;
   });
 
   // ---- 動態規劃：挑選最連續的候選路徑 ----
   const speedNorm = Float64Array.from(handSpeed, (v) => (Number.isFinite(v) ? v / maxHandSpeed : 0));
-  const selected = selectPath(cands, arm, speedNorm, t, fps, w);
+  const selected = selectPath(cands, arm, speedNorm, t, fps, w, L, opt.useInertia ?? true, opt.inertiaBias ?? INERTIA_BIAS);
 
   // ---- 量測序列（角度沿路徑連續化） ----
   const zPsi = new Float64Array(n).fill(NaN);
@@ -207,7 +217,8 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     rPsi[f] = manual ? (1 * DEG) ** 2 : (SIGMA_MEAS / Math.max(c.conf, 0.05)) ** 2;
     measSrc[f] = c.src;
     selConf[f] = c.conf;
-    if (!c.oof) {
+    // 明顯偏短的長度多半是末端判斷失敗，不當作長度量測（人工標記除外）
+    if (!c.oof && (manual || c.r >= 0.8 * L)) {
       zLen[f] = c.r / L;
       rLen[f] = manual ? 0.0004 : (0.05 / Math.max(c.conf, 0.05)) ** 2;
     }
@@ -290,14 +301,15 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     else if (prev >= 0 && next >= 0 && t[next] - t[prev] <= interpGapSec) label = ClubSource.Predicted;
     else label = ClubSource.HandEstimate;
 
-    const lenRatio = Number.isFinite(lenSm.x[f]) ? lenSm.x[f] : 0.95;
+    const lenRatio = Number.isFinite(lenSm.x[f]) ? lenSm.x[f] : 1;
     let r = Math.min(1.5, Math.max(0.35, lenRatio)) * L;
     let theta = arm[f] + sm.x[f];
     if (label !== ClubSource.Predicted && label !== ClubSource.HandEstimate) {
-      // 有量測的格：採用擬合較好的模型；兩個模型都跟不上時直接用量測值
+      // 有量測的格：清晰的量測直接採用；不清晰時採用擬合較好的模型
       const res = residual(f);
-      if (res.abs > 10 * DEG) theta = zTheta[f];
+      if (selConf[f] >= 0.6 || res.abs > 10 * DEG) theta = zTheta[f];
       else if (!res.psiBetter) theta = thSm.x[f];
+      pin[f] = 1 + 8 * selConf[f] * selConf[f];
     } else if (label === ClubSource.Predicted && measSrc[prev] === ClubSource.Manual && measSrc[next] === ClubSource.Manual) {
       // 前後都是人工標記：在兩個實際位置之間依時間線性內插角度與長度，避免慣性模型過衝
       const u = (t[f] - t[prev]) / Math.max(t[next] - t[prev], 1e-6);
@@ -332,12 +344,12 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   const sigA = new Float64Array(n);
   const sigL = new Float64Array(n);
   const reachFrames = Math.max(1, Math.round(fps * 0.05));
-  // 桿身角速度（每秒 600° 視為高速）
+  // 桿身角速度（每秒 300° 視為高速）
   const angFast = new Float64Array(n);
   for (let f = 0; f < n; f++) {
     const a = Math.max(0, f - 1);
     const b = Math.min(n - 1, f + 1);
-    angFast[f] = Math.abs(thetaF[b] - thetaF[a]) / Math.max(t[b] - t[a], 1e-6) / (600 * DEG);
+    angFast[f] = Math.abs(thetaF[b] - thetaF[a]) / Math.max(t[b] - t[a], 1e-6) / (300 * DEG);
   }
   for (let f = 0; f < n; f++) {
     let sp = 0;
@@ -366,7 +378,17 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
  * 成本 = 候選信心 + 手腕角的變化量（依時間差放寬）+ 略過格數 + 重新開始的懲罰
  * 回傳每格選中的候選索引，-1 表示略過
  */
-function selectPath(cands: Cand[][], arm: Float64Array, speedNorm: Float64Array, t: Float64Array, fps: number, w: number): Int32Array {
+function selectPath(
+  cands: Cand[][],
+  arm: Float64Array,
+  speedNorm: Float64Array,
+  t: Float64Array,
+  fps: number,
+  w: number,
+  L: number,
+  useInertia: boolean,
+  inertiaBias: number,
+): Int32Array {
   const n = cands.length;
   const G = Math.max(2, Math.round(fps * 0.2));
   const C_MISS = 1.2 * w;
@@ -388,6 +410,32 @@ function selectPath(cands: Cand[][], arm: Float64Array, speedNorm: Float64Array,
   const prior = (c: Cand) => {
     const over = Math.abs(c.psi) - 150 * DEG;
     return over > 0 ? (over / (30 * DEG)) ** 2 * w : 0;
+  };
+
+  /** 候選 c（在 f）相對於 p（在 pf、索引 pj）沿路徑的慣性外推成本 */
+  const inertiaCost = (c: Cand, p: Cand, pf: number, pj: number, dt: number) => {
+    const qf = bpF[pf][pj];
+    if (qf < 0) return Infinity;
+    const q = cands[qf][bpK[pf][pj]];
+    const dt1 = Math.max(t[pf] - t[qf], 1e-4);
+    const vx = (p.x - q.x) / dt1;
+    const vy = (p.y - q.y) / dt1;
+    let ax = 0;
+    let ay = 0;
+    const rf = bpF[qf][bpK[pf][pj]];
+    if (rf >= 0) {
+      const r = cands[rf][bpK[qf][bpK[pf][pj]]];
+      const dt2 = Math.max(t[qf] - t[rf], 1e-4);
+      const span = (dt1 + dt2) / 2;
+      ax = (vx - (q.x - r.x) / dt2) / span;
+      ay = (vy - (q.y - r.y) / dt2) / span;
+    }
+    // 後向差分是中點速度，補半格加速度修正
+    const px = p.x + (vx + (ax * dt1) / 2) * dt + 0.5 * ax * dt * dt;
+    const py = p.y + (vy + (ay * dt1) / 2) * dt + 0.5 * ay * dt * dt;
+    // 外推的不確定性隨移動量增加
+    const sigmaPos = 0.12 * L + 0.35 * Math.hypot(vx, vy) * dt;
+    return huber(Math.hypot(c.x - px, c.y - py) / sigmaPos);
   };
 
   for (let f = 0; f < n; f++) {
@@ -413,6 +461,12 @@ function selectPath(cands: Cand[][], arm: Float64Array, speedNorm: Float64Array,
           // 兩種合理運動取其一：桿身跟著手臂轉（手腕角不變），或桿身滯後（絕對角度不變）
           const dTheta = wrap(c.theta - p.theta);
           let smooth = Math.min(huber(wrap(c.psi - p.psi) / sigma), huber(dTheta / sigma));
+          // 第三種：慣性（沿已選路徑往回取兩點，等加速度外推到這一格）
+          if (useInertia) {
+            const inertia = inertiaCost(c, p, f - g, j, dt);
+            // 已有前段路徑時，優先以慣性解釋；其他運動模型需付出額外成本
+            if (Number.isFinite(inertia)) smooth = Math.min(inertia, smooth + inertiaBias);
+          }
           // 快速轉動時，桿身應與手臂同方向旋轉
           const dArm = arm[f] - arm[f - g];
           // 接近半圈時正負方向無法分辨，兩個方向都可能

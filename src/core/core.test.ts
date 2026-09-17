@@ -9,6 +9,7 @@ import { rng, SYN, syntheticSwing } from './testing/synthetic';
 import { trackClub } from './tracking/clubTracker';
 import { fillGapsLinear, Kalman1D, OneEuroFilter, rtsSmoothCA, zeroPhaseOneEuro } from './tracking/filters';
 import { smoothPose } from './tracking/poseSmoothing';
+import { predictNext } from './tracking/inertia';
 import { LM } from './landmarks';
 import { parseYolo } from './inference/clubDetector';
 import { catmullRom } from '../overlay/layers';
@@ -57,6 +58,34 @@ describe('filters', () => {
     }
     expect(k.x[0]).toBeCloseTo(15, 0);
     expect(k.x[1]).toBeCloseTo(5, 0);
+  });
+});
+
+describe('inertia', () => {
+  const t = Float64Array.from({ length: 10 }, (_, i) => i / 30);
+  it('直角座標等加速度：精準外推下一格', () => {
+    const pos = (x: number) => ({ x: 10 + 50 * x + 200 * x * x, y: 5 - 30 * x + 90 * x * x });
+    const club = Array.from(t, pos);
+    const hands = Array.from(t, () => ({ x: 0, y: 0 }));
+    const s = predictNext(club, hands, t, 5, 'cartAccel')!;
+    const truth = pos(t[6]);
+    expect(Math.hypot(s.next.x - truth.x, s.next.y - truth.y)).toBeLessThan(1e-6);
+    expect(s.ax).toBeCloseTo(400, 3);
+  });
+  it('繞圓心等角速度旋轉：旋轉模型精準、直角座標模型有誤差', () => {
+    const w = 10; // rad/s
+    const hands = Array.from(t, (x) => ({ x: 100 + 20 * x, y: 50 }));
+    const club = Array.from(t, (x, i) => ({ x: hands[i].x + 80 * Math.cos(w * x), y: hands[i].y + 80 * Math.sin(w * x) }));
+    const truth = club[6];
+    const polar = predictNext(club, hands, t, 5, 'polarVel')!;
+    const cart = predictNext(club, hands, t, 5, 'cartVel')!;
+    expect(Math.hypot(polar.next.x - truth.x, polar.next.y - truth.y)).toBeLessThan(1e-6);
+    expect(polar.omega).toBeCloseTo(w, 6);
+    expect(Math.hypot(cart.next.x - truth.x, cart.next.y - truth.y)).toBeGreaterThan(1);
+  });
+  it('缺少前一格時回傳 null', () => {
+    const club = [{ x: 0, y: 0 }, null, { x: 1, y: 1 }];
+    expect(predictNext(club, [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }], t, 2)).toBeNull();
   });
 });
 
