@@ -91,18 +91,24 @@ export class ShaftDetector {
       return Math.max(0, (Math.abs(c - a) + Math.abs(c - b) - Math.abs(a - b)) / 2);
     };
 
-    // 排除往手臂方向的角度（前臂本身也是長條狀）
-    const armDirs: number[] = [];
-    for (const [e, w] of [
-      [LM.leftElbow, LM.leftWrist],
-      [LM.rightElbow, LM.rightWrist],
-    ] as const) {
-      armDirs.push(Math.atan2((p[e].y - p[w].y) * H, (p[e].x - p[w].x) * W));
-    }
-
     const rIn = 0.18 * L;
     const rOut = 0.85 * L;
     const step = 1.5;
+    // 扣除兩側紋理後的細線強度
+    const thinRidge = (cx: number, cy: number, nx: number, ny: number) => {
+      const v = ridge(cx, cy, nx, ny);
+      if (Number.isNaN(v)) return NaN;
+      const o2 = off * 3;
+      const v1 = ridge(cx + nx * o2, cy + ny * o2, nx, ny);
+      const v2 = ridge(cx - nx * o2, cy - ny * o2, nx, ny);
+      return Math.max(0, v - Math.max(Number.isNaN(v1) ? 0 : v1, Number.isNaN(v2) ? 0 : v2));
+    };
+    // 桿身朝向鏡頭時畫面上會縮短：分別以不同長度積分，取最佳（越短略扣分）
+    const SPANS = [
+      { end: 0.85, weight: 1 },
+      { end: 0.65, weight: 0.93 },
+      { end: 0.48, weight: 0.85 },
+    ];
     // 雙手中心的估計可能偏離實際握把數十像素，允許直線有橫向偏移
     const OFFSETS = [0, -0.06, 0.06, -0.12, 0.12].map((v) => v * L);
     const lineScore = (rf: typeof ridge, th: number, k: number, stepSize: number, minFrac: number, lo = 0) => {
@@ -113,28 +119,36 @@ export class ShaftDetector {
       const o2 = off * 3 * k;
       const ox = (hx + nx * lo) * k;
       const oy = (hy + ny * lo) * k;
+      // 累積值，依距離分段取平均
       let s = 0;
       let c = 0;
-      for (let r = rIn * k; r <= rOut * k; r += stepSize) {
+      let best = 0;
+      let si = SPANS.length - 1;
+      for (let r = rIn * k; r <= rOut * k + 1e-6; r += stepSize) {
         const cx = ox + dx * r;
         const cy = oy + dy * r;
         const v = rf(cx, cy, nx, ny);
-        if (Number.isNaN(v)) continue;
-        // 細線：中心脊線強、旁邊弱；一整片紋理（樹林、草地）旁邊也強，會被扣掉
-        const v1 = rf(cx + nx * o2, cy + ny * o2, nx, ny);
-        const v2 = rf(cx - nx * o2, cy - ny * o2, nx, ny);
-        const side = Math.max(Number.isNaN(v1) ? 0 : v1, Number.isNaN(v2) ? 0 : v2);
-        s += Math.max(0, v - side);
-        c++;
+        if (!Number.isNaN(v)) {
+          // 細線：中心脊線強、旁邊弱；一整片紋理（樹林、草地）旁邊也強，會被扣掉
+          const v1 = rf(cx + nx * o2, cy + ny * o2, nx, ny);
+          const v2 = rf(cx - nx * o2, cy - ny * o2, nx, ny);
+          const side = Math.max(Number.isNaN(v1) ? 0 : v1, Number.isNaN(v2) ? 0 : v2);
+          s += Math.max(0, v - side);
+          c++;
+        }
+        while (si >= 0 && r >= SPANS[si].end * L * k - stepSize / 2) {
+          const span = ((SPANS[si].end * L - rIn) * k) / stepSize;
+          // 射線大部分落在畫面外時不可信
+          if (c > span * minFrac) best = Math.max(best, (s / c) * SPANS[si].weight);
+          si--;
+        }
       }
-      // 射線大部分落在畫面外時不可信
-      return c > (((rOut - rIn) * k) / stepSize) * minFrac ? s / c : 0;
+      return best;
     };
     for (let k = 0; k < N_ANGLES; k++) {
       const th = k * DEG;
       this.score[k] = 0;
       this.bestOffset[k] = 0;
-      if (armDirs.some((a) => Math.abs(angDiff(th, a)) < 28 * DEG)) continue;
       for (let i = 0; i < OFFSETS.length; i++) {
         // 偏移越大略為扣分，避免無關的平行線
         const v = lineScore(ridge, th, 1, step, 0.6, OFFSETS[i]) * (1 - 0.04 * i);
@@ -196,7 +210,7 @@ export class ShaftDetector {
       const lo = this.bestOffset[k];
       const ox = hx - Math.sin(th) * lo;
       const oy = hy + Math.cos(th) * lo;
-      const { end, outOfFrame } = this.findEnd(ridge, ox, oy, th, L, rIn, off, W, H);
+      const { end, outOfFrame } = this.findEnd(thinRidge, ox, oy, th, L, rIn, off, W, H);
       if (!outOfFrame && out.length === 0 && conf > 0.5) {
         this.lenRatios.push(end / L);
         if (this.lenRatios.length > 60) this.lenRatios.shift();
@@ -247,21 +261,15 @@ export class ShaftDetector {
       }
       return s / c;
     });
-    const refVals = smooth.slice(Math.round(rIn), Math.round(0.7 * L)).sort((a, b) => a - b);
+    // 以靠近雙手的一段（必定是桿身）作為強度基準
+    const refVals = smooth.slice(Math.round(rIn), Math.round(0.4 * L)).sort((a, b) => a - b);
     const ref = refVals[Math.floor(refVals.length / 2)] ?? 0;
-    let end = Math.round(0.75 * L);
-    for (let r = Math.round(0.6 * L); r < Math.min(smooth.length, exitAt); r++) {
-      if (smooth[r] >= ref * 0.35) end = r;
-      else if (r - end > 0.08 * L) break;
+    let end = Math.round(0.4 * L);
+    for (let r = Math.round(0.4 * L); r < Math.min(smooth.length, exitAt); r++) {
+      if (smooth[r] >= ref * 0.3) end = r;
+      else if (r - end > 0.06 * L) break;
     }
     if (exitAt - end < 12) return { end: Math.round(Math.max(end, this.lenRatio() * L)), outOfFrame: true };
     return { end: Math.min(end, Math.round(1.35 * L)), outOfFrame: false };
   }
-}
-
-function angDiff(a: number, b: number) {
-  let d = a - b;
-  while (d > Math.PI) d -= 2 * Math.PI;
-  while (d < -Math.PI) d += 2 * Math.PI;
-  return d;
 }

@@ -43,6 +43,8 @@ const DEG = Math.PI / 180;
 const SIGMA_MEAS = 4 * DEG;
 /** 手腕角加加速度的過程雜訊強度 (rad/s³)² */
 const Q_PSI = (1500 * DEG * 30) ** 2;
+/** 桿身絕對角度的過程雜訊強度：甩桿時角速度變化比手腕角更劇烈 */
+const Q_THETA = (6000 * DEG * 30) ** 2;
 /** 桿長比例的過程雜訊強度 */
 const Q_LEN = 400;
 
@@ -165,7 +167,8 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   });
 
   // ---- 動態規劃：挑選最連續的候選路徑 ----
-  const selected = selectPath(cands, arm, t, fps, w);
+  const speedNorm = Float64Array.from(handSpeed, (v) => (Number.isFinite(v) ? v / maxHandSpeed : 0));
+  const selected = selectPath(cands, arm, speedNorm, t, fps, w);
 
   // ---- 量測序列（角度沿路徑連續化） ----
   const zPsi = new Float64Array(n).fill(NaN);
@@ -174,6 +177,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   const zLen = new Float64Array(n).fill(NaN);
   const rLen = new Float64Array(n).fill(NaN);
   const measSrc = new Uint8Array(n).fill(ClubSource.None);
+  const selConf = new Float64Array(n);
   let prevPsi = NaN;
   let prevTheta = NaN;
   let prevF = -1;
@@ -197,6 +201,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     zPsi[f] = psi;
     rPsi[f] = manual ? (1 * DEG) ** 2 : (SIGMA_MEAS / Math.max(c.conf, 0.05)) ** 2;
     measSrc[f] = c.src;
+    selConf[f] = c.conf;
     if (!c.oof) {
       zLen[f] = c.r / L;
       rLen[f] = manual ? 0.0004 : (0.05 / Math.max(c.conf, 0.05)) ** 2;
@@ -208,7 +213,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   // ---- 前後慣性平滑 + 殘差剔除 ----
   // 兩個模型：手腕角（桿身跟著手臂轉）與絕對角度（桿身滯後、甩出）；殘差取兩者較小者
   let sm = rtsSmoothCA(zPsi, rPsi, t, Q_PSI);
-  let thSm = rtsSmoothCA(zTheta, rPsi, t, Q_PSI);
+  let thSm = rtsSmoothCA(zTheta, rPsi, t, Q_THETA);
   const residual = (f: number) => {
     const rp = Math.abs(zPsi[f] - sm.x[f]) / Math.sqrt(sm.varX[f] + rPsi[f]);
     const rt = Math.abs(zTheta[f] - thSm.x[f]) / Math.sqrt(thSm.varX[f] + rPsi[f]);
@@ -220,6 +225,8 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     let removed = 0;
     for (let f = 0; f < n; f++) {
       if (Number.isNaN(zPsi[f]) || measSrc[f] === ClubSource.Manual) continue;
+      // 非常清晰的偵測已通過路徑連續性檢查，不因慣性模型跟不上而剔除
+      if (selConf[f] >= 0.9) continue;
       const r = residual(f);
       if (r.z > 3 && r.abs > 15 * DEG) {
         zPsi[f] = NaN;
@@ -231,7 +238,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     }
     if (!removed) break;
     sm = rtsSmoothCA(zPsi, rPsi, t, Q_PSI);
-    thSm = rtsSmoothCA(zTheta, rPsi, t, Q_PSI);
+    thSm = rtsSmoothCA(zTheta, rPsi, t, Q_THETA);
   }
   const lenSm = rtsSmoothCA(zLen, rLen, t, Q_LEN);
 
@@ -261,8 +268,10 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     const r = Math.min(1.5, Math.max(0.35, lenRatio)) * L;
     let theta = arm[f] + sm.x[f];
     if (label !== ClubSource.Predicted && label !== ClubSource.HandEstimate) {
-      // 有量測的格：採用擬合較好的模型
-      if (!residual(f).psiBetter) theta = thSm.x[f];
+      // 有量測的格：採用擬合較好的模型；兩個模型都跟不上時直接用量測值
+      const res = residual(f);
+      if (res.abs > 10 * DEG) theta = zTheta[f];
+      else if (!res.psiBetter) theta = thSm.x[f];
     } else if (label === ClubSource.Predicted && Math.abs(zPsi[next] - zPsi[prev]) > 30 * DEG) {
       // 缺口前後手腕角變化大：桿身不是跟著手臂轉，改用絕對角度的慣性推估
       theta = thSm.x[f];
@@ -290,7 +299,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
  * 成本 = 候選信心 + 手腕角的變化量（依時間差放寬）+ 略過格數 + 重新開始的懲罰
  * 回傳每格選中的候選索引，-1 表示略過
  */
-function selectPath(cands: Cand[][], arm: Float64Array, t: Float64Array, fps: number, w: number): Int32Array {
+function selectPath(cands: Cand[][], arm: Float64Array, speedNorm: Float64Array, t: Float64Array, fps: number, w: number): Int32Array {
   const n = cands.length;
   const G = Math.max(2, Math.round(fps * 0.2));
   const C_MISS = 1.2 * w;
@@ -324,7 +333,9 @@ function selectPath(cands: Cand[][], arm: Float64Array, t: Float64Array, fps: nu
       for (let g = 1; g <= G && f - g >= 0; g++) {
         const pl = cands[f - g];
         const dt = Math.max(t[f] - t[f - g], 1e-4);
-        const sigma = 8 * DEG + 600 * DEG * dt;
+        // 擊球前後桿身每秒可轉數千度：雙手越快，容許的角度變化越大
+        const fast = Math.max(speedNorm[f], speedNorm[f - g]);
+        const sigma = 8 * DEG + (600 + 2400 * fast) * DEG * dt;
         const miss = C_MISS * (g - 1);
         for (let j = 0; j < pl.length; j++) {
           const base = best[f - g][j];
@@ -337,7 +348,9 @@ function selectPath(cands: Cand[][], arm: Float64Array, t: Float64Array, fps: nu
           let smooth = Math.min(huber(wrap(c.psi - p.psi) / sigma), huber(dTheta / sigma));
           // 快速轉動時，桿身應與手臂同方向旋轉
           const dArm = arm[f] - arm[f - g];
-          if (Math.abs(dTheta) > 30 * DEG && Math.abs(dArm) > 10 * DEG && Math.sign(dTheta) !== Math.sign(dArm)) smooth += 3;
+          // 接近半圈時正負方向無法分辨，兩個方向都可能
+          const ambiguous = Math.abs(dTheta) > 150 * DEG;
+          if (!ambiguous && Math.abs(dTheta) > 30 * DEG && Math.abs(dArm) > 10 * DEG && Math.sign(dTheta) !== Math.sign(dArm)) smooth += 3;
           const cost = base + miss + smooth * w;
           if (cost < bestCost) {
             bestCost = cost;

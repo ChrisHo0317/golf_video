@@ -6,7 +6,7 @@ import { ClubDetector, type ClubDetection } from './clubDetector';
 import { createPoseLandmarker, POSE_MODEL_VERSION, type PoseModel } from './pose';
 import { ShaftDetector } from './shaftDetector';
 
-export const SHAFT_DETECTOR_VERSION = 'shaft-cv-4';
+export const SHAFT_DETECTOR_VERSION = 'shaft-cv-5';
 
 export interface InferenceProgress {
   stage: 'loading' | 'processing' | 'done';
