@@ -24,10 +24,19 @@ export interface InferenceOptions {
   onProgress: (p: InferenceProgress) => void;
 }
 
+export interface Thumb {
+  mediaTime: number;
+  image: ImageData;
+}
+
 export interface InferenceOutput {
   frames: FrameData;
   modelVersions: { pose: string; club: string };
+  /** 分析過程中順便擷取的小縮圖（約每 0.1 秒一張），用來產生紀錄縮圖，不需再開影片 */
+  thumbs: Thumb[];
 }
+
+const THUMB_MAX = 200;
 
 let clubDetectorPromise: Promise<ClubDetector | null> | null = null;
 export function getClubDetector() {
@@ -45,6 +54,9 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
   const clubRaw: number[] = [];
   const clubRawSrc: number[] = [];
   const cands: number[] = [];
+  const thumbs: Thumb[] = [];
+  let thumbCtx: CanvasRenderingContext2D | null = null;
+  let lastThumbT = -Infinity;
   const shaft = new ShaftDetector();
   const srcOpt = {
     start: video.trimStart,
@@ -101,6 +113,23 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
       }
       mediaT.push(fr.mediaTime);
 
+      if (fr.mediaTime - lastThumbT >= 0.1) {
+        lastThumbT = fr.mediaTime;
+        const s = Math.min(1, THUMB_MAX / Math.max(cw, ch));
+        const tw = Math.max(1, Math.round(cw * s));
+        const th = Math.max(1, Math.round(ch * s));
+        if (!thumbCtx) {
+          const c = document.createElement('canvas');
+          c.width = tw;
+          c.height = th;
+          thumbCtx = c.getContext('2d', { willReadFrequently: true });
+        }
+        if (thumbCtx) {
+          thumbCtx.drawImage(fr.canvas as CanvasImageSource, 0, 0, tw, th);
+          thumbs.push({ mediaTime: fr.mediaTime, image: thumbCtx.getImageData(0, 0, tw, th) });
+        }
+      }
+
       if (performance.now() - lastYield > 100) {
         opt.onProgress({ stage: 'processing', done: mediaT.length, total: fr.total, preview: fr.canvas });
         await new Promise((r) => setTimeout(r, 0));
@@ -130,6 +159,7 @@ export async function runInference(file: Blob, video: VideoMeta, opt: InferenceO
       club: new Float32Array(n * 2).fill(NaN),
       clubSource: new Uint8Array(n).fill(ClubSource.None),
     },
+    thumbs,
     modelVersions: { pose: `${POSE_MODEL_VERSION}-${opt.poseModel}`, club: club ? `${club.meta.version}+${SHAFT_DETECTOR_VERSION}` : SHAFT_DETECTOR_VERSION },
   };
 }

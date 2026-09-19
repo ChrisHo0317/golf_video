@@ -54,7 +54,8 @@ const en: Dict = {
     cancel: 'Cancel',
     failed: 'Analysis failed: {{msg}}',
     noPose: 'No person detected — make sure the full body is in frame',
-    noClubModel: 'Club head model not installed; the club head is located by detecting the shaft in the image, with hand-direction estimates (dashed) where it is not visible',
+    saveTimeout: 'Saving timed out: browser storage did not respond. Check free space on the device, or enable persistent storage in Settings and retry',
+    noClubModel: 'Note: the club head is located by detecting the shaft in the image (default when no AI club model is installed); analysis is not affected',
   },
   viewer: {
     layers: 'Layers',

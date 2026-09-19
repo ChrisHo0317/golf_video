@@ -1,4 +1,5 @@
 import { createFile, MP4BoxBuffer, type ISOFile, type Movie } from 'mp4box';
+import { loadVideo } from './videoElement';
 
 export interface ProbeResult {
   durationSec: number;
@@ -74,28 +75,19 @@ export async function probeVideo(file: Blob): Promise<ProbeResult> {
   return probeWithElement(file);
 }
 
-function probeWithElement(file: Blob): Promise<ProbeResult> {
-  return new Promise((resolve, reject) => {
-    const v = document.createElement('video');
-    const url = URL.createObjectURL(file);
-    v.preload = 'metadata';
-    v.muted = true;
-    v.onloadedmetadata = () => {
-      resolve({
-        durationSec: v.duration,
-        fps: 60,
-        width: v.videoWidth,
-        height: v.videoHeight,
-        rotation: 0,
-        codec: null,
-        demuxable: false,
-      });
-      URL.revokeObjectURL(url);
+async function probeWithElement(file: Blob): Promise<ProbeResult> {
+  const { video, dispose } = await loadVideo(file, 10000);
+  try {
+    return {
+      durationSec: video.duration,
+      fps: 60,
+      width: video.videoWidth,
+      height: video.videoHeight,
+      rotation: 0,
+      codec: null,
+      demuxable: false,
     };
-    v.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('unsupported-video'));
-    };
-    v.src = url;
-  });
+  } finally {
+    dispose();
+  }
 }

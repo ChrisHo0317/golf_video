@@ -349,6 +349,23 @@ describe('frameCodec', () => {
   });
 });
 
+describe('frameCodec 無壓縮支援時', () => {
+  it('不支援 CompressionStream 時改存未壓縮資料，仍可還原', async () => {
+    const g = globalThis as unknown as { CompressionStream?: unknown };
+    const saved = g.CompressionStream;
+    g.CompressionStream = undefined;
+    try {
+      const fd = syntheticSwing();
+      const blob = await encodeFrames(fd);
+      const back = await decodeFrames(blob);
+      expect(back.n).toBe(fd.n);
+      expect(back.pose2d[123]).toBe(fd.pose2d[123]);
+    } finally {
+      g.CompressionStream = saved;
+    }
+  });
+});
+
 describe('parseYolo', () => {
   it('解析 [1, 4+nc, N] 輸出', () => {
     const N = 3;

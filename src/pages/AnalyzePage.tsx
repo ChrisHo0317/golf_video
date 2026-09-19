@@ -6,7 +6,9 @@ import type { PoseModel } from '../core/inference/pose';
 import { LM, vis } from '../core/landmarks';
 import { analyze } from '../core/pipeline';
 import { smoothPose } from '../core/tracking/poseSmoothing';
-import { captureVideoFrame } from '../core/video/snapshot';
+import type { Thumb } from '../core/inference/runInference';
+import { canvasToJpeg, captureVideoFrame } from '../core/video/snapshot';
+import { withTimeout } from '../core/video/videoElement';
 import { db, saveSession } from '../storage/db';
 import { getVideo } from '../storage/videoStore';
 import { useSettings } from '../store/settings';
@@ -19,6 +21,21 @@ const QUALITY: Record<Quality, { stride: number; maxSide: number; pose?: PoseMod
 };
 
 type Stage = InferenceProgress['stage'] | 'post' | 'saving' | 'error';
+
+/** 紀錄縮圖：優先用分析時擷取的畫面；沒有時才另開影片擷取（有逾時，失敗就不存縮圖） */
+async function makeThumbnail(thumbs: Thumb[], time: number, blob: Blob): Promise<Blob | null> {
+  let best: Thumb | null = null;
+  for (const th of thumbs) if (!best || Math.abs(th.mediaTime - time) < Math.abs(best.mediaTime - time)) best = th;
+  if (best) {
+    const c = document.createElement('canvas');
+    c.width = best.image.width;
+    c.height = best.image.height;
+    c.getContext('2d')!.putImageData(best.image, 0, 0);
+    const jpg = await canvasToJpeg(c, c.width, c.height);
+    if (jpg) return jpg;
+  }
+  return withTimeout(captureVideoFrame(blob, time), 8000, null);
+}
 
 export default function AnalyzePage() {
   const { id = '' } = useParams();
@@ -80,8 +97,8 @@ export default function AnalyzePage() {
       if (!res) throw new Error(t('analyze.noPose'));
 
       setStage('saving');
-      const thumbnail = await captureVideoFrame(blob, fd.mediaT[res.phases.impact]);
-      await saveSession(
+      const thumbnail = await makeThumbnail(out.thumbs, fd.mediaT[res.phases.impact], blob);
+      const saving = saveSession(
         {
           ...session,
           phases: res.phases,
@@ -93,6 +110,9 @@ export default function AnalyzePage() {
         },
         fd,
       );
+      // 儲存不應超過數秒；萬一瀏覽器的儲存空間沒有回應，顯示錯誤而不是一直停在「儲存中」
+      const ok = await withTimeout(saving.then(() => true), 60000, false);
+      if (!ok) throw new Error(t('analyze.saveTimeout'));
       nav(`/session/${id}`, { replace: true });
     })().catch((e: unknown) => {
       if ((e as DOMException)?.name === 'AbortError') return;
@@ -140,7 +160,7 @@ export default function AnalyzePage() {
           <div className="progress">
             <div style={{ width: `${stage === 'loading' ? 2 : stage === 'processing' ? pct : 100}%` }} />
           </div>
-          {noClub && <div className="notice warn">{t('analyze.noClubModel')}</div>}
+          {noClub && <div className="notice muted">{t('analyze.noClubModel')}</div>}
           <div>
             <button className="btn" onClick={cancel}>
               {t('analyze.cancel')}

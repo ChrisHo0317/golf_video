@@ -276,6 +276,11 @@ a {
   font-size: 13px;
 }
 
+.notice.muted {
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
 .notice.warn {
   background: color-mix(in srgb, var(--warn) 15%, transparent);
 }

@@ -36,12 +36,26 @@ export async function encodeFrames(fd: FrameData): Promise<Blob> {
     const src = fd[a.key] as TA;
     body.set(new Uint8Array(src.buffer, src.byteOffset, src.byteLength), base + a.offset);
   }
+  // 舊版 iOS（16.4 以前）沒有 CompressionStream：改存未壓縮資料並加上標記
+  if (typeof CompressionStream === 'undefined') {
+    return new Blob([RAW_MAGIC as BlobPart, body as BlobPart], { type: 'application/octet-stream' });
+  }
   const gz = await pipe(body, new CompressionStream('gzip'));
   return new Blob([gz as BlobPart], { type: 'application/octet-stream' });
 }
 
+/** 未壓縮資料的開頭標記 */
+const RAW_MAGIC = new TextEncoder().encode('SWL0');
+
+async function readBody(blob: Blob): Promise<Uint8Array> {
+  const head = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+  if (head.length === 4 && head.every((b, i) => b === RAW_MAGIC[i])) return new Uint8Array(await blob.slice(4).arrayBuffer());
+  if (typeof DecompressionStream === 'undefined') throw new Error('decompression-unsupported');
+  return pipe(blob, new DecompressionStream('gzip'));
+}
+
 export async function decodeFrames(blob: Blob): Promise<FrameData> {
-  const body = await pipe(blob, new DecompressionStream('gzip'));
+  const body = await readBody(blob);
   const hLen = new DataView(body.buffer, body.byteOffset).getUint32(0, true);
   const header = JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + hLen))) as Header;
   const base = 4 + hLen;

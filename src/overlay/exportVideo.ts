@@ -1,5 +1,6 @@
 import type { AnalysisResult } from '../core/pipeline';
 import type { CaptureInfo, FrameData } from '../types';
+import { loadVideo, seekVideo } from '../core/video/videoElement';
 import { renderOverlay, type LayerSettings, type TrailMode } from './renderer';
 
 /** 在已排序的媒體時間陣列中找最接近的格 */
@@ -44,20 +45,11 @@ export async function exportAnnotatedVideo(inp: ExportVideoInput): Promise<{ blo
   canvas.height = ch;
   const ctx = canvas.getContext('2d')!;
 
-  const v = document.createElement('video');
-  const url = URL.createObjectURL(inp.blob);
-  v.muted = true;
-  v.playsInline = true;
-  v.src = url;
-  await new Promise<void>((res, rej) => {
-    v.onloadeddata = () => res();
-    v.onerror = () => rej(new Error('video'));
-  });
+  const { video: v, dispose } = await loadVideo(inp.blob);
 
   const start = fd.mediaT[0];
   const end = fd.mediaT[fd.n - 1];
-  v.currentTime = start;
-  await new Promise((r) => (v.onseeked = r));
+  await seekVideo(v, start);
 
   const mime = pickMime();
   const stream = canvas.captureStream(60);
@@ -114,7 +106,7 @@ export async function exportAnnotatedVideo(inp: ExportVideoInput): Promise<{ blo
   });
   rec.stop();
   await stopped;
-  URL.revokeObjectURL(url);
+  dispose();
   const type = rec.mimeType || mime || 'video/webm';
   return { blob: new Blob(chunks, { type }), ext: type.includes('mp4') ? 'mp4' : 'webm' };
 }

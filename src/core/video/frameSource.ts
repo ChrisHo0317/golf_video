@@ -1,5 +1,6 @@
 import { DataStream, Endianness, type Sample } from 'mp4box';
 import { demux } from './probe';
+import { loadVideo, seekVideo } from './videoElement';
 
 export interface FrameSourceOptions {
   start: number;
@@ -212,17 +213,8 @@ async function* decodeSamples(samples: Sample[], config: VideoDecoderConfig, opt
 }
 
 async function* seekFrames(file: Blob, opt: FrameSourceOptions): AsyncGenerator<AnalysisFrame> {
-  const v = document.createElement('video');
-  const url = URL.createObjectURL(file);
-  v.muted = true;
-  v.playsInline = true;
-  v.preload = 'auto';
-  v.src = url;
+  const { video: v, dispose } = await loadVideo(file);
   try {
-    await new Promise<void>((res, rej) => {
-      v.onloadeddata = () => res();
-      v.onerror = () => rej(new Error('unsupported-video'));
-    });
     const { w, h } = fitSize(v.videoWidth, v.videoHeight, opt.maxSide);
     const { canvas, ctx } = makeCanvas(w, h);
     const step = opt.stride / opt.fallbackFps;
@@ -230,30 +222,11 @@ async function* seekFrames(file: Blob, opt: FrameSourceOptions): AsyncGenerator<
     for (let i = 0; i < total; i++) {
       if (opt.signal?.aborted) throw new DOMException('aborted', 'AbortError');
       const tt = opt.start + i * step;
-      await seekTo(v, tt);
+      await seekVideo(v, tt, 1500);
       ctx.drawImage(v, 0, 0, w, h);
       yield { canvas, mediaTime: tt, total };
     }
   } finally {
-    URL.revokeObjectURL(url);
-    v.removeAttribute('src');
-    v.load();
+    dispose();
   }
-}
-
-function seekTo(v: HTMLVideoElement, t: number): Promise<void> {
-  return new Promise((res) => {
-    const done = () => {
-      v.removeEventListener('seeked', onSeeked);
-      res();
-    };
-    const onSeeked = () => {
-      if ('requestVideoFrameCallback' in v) v.requestVideoFrameCallback(() => done());
-      else done();
-    };
-    v.addEventListener('seeked', onSeeked);
-    v.currentTime = t;
-    // 部分瀏覽器 seek 後不觸發畫面回呼，設定逾時保護
-    setTimeout(done, 1500);
-  });
 }
