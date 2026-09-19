@@ -82,6 +82,8 @@ const en: Dict = {
     notesPlaceholder: 'How did this swing feel? Ball flight?',
     title: 'Title',
     predictError: 'pred. error',
+    playFailed: 'Video could not be played',
+    videoLoadFailed: 'Video failed to load; this browser may not support the video format',
   },
   layer: {
     skeleton: 'Skeleton',

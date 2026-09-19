@@ -37,13 +37,27 @@ export async function getVideo(key: string): Promise<Blob | null> {
   if (dir) {
     try {
       const fh = await dir.getFileHandle(key);
-      return await fh.getFile();
+      const file = await fh.getFile();
+      // Safari 寫入失敗時可能留下空檔，視為不存在
+      if (file.size > 0) return file;
     } catch {
       // 不在 OPFS
     }
   }
   const row = await videos.get(key);
-  return row?.blob ?? null;
+  return row?.blob?.size ? row.blob : null;
+}
+
+/**
+ * 取得可直接給 <video> 播放的影片。
+ * iOS Safari 對「從 IndexedDB 讀出的 Blob」建立的播放網址常播放失敗（WebKit 已知問題），
+ * 且 OPFS 讀回的檔案沒有 MIME 類型；因此複製成記憶體中的新 Blob 並補上類型。
+ */
+export async function getPlayableVideo(key: string, mimeType?: string): Promise<Blob | null> {
+  const blob = await getVideo(key);
+  if (!blob) return null;
+  const type = blob.type || mimeType || 'video/mp4';
+  return new Blob([await blob.arrayBuffer()], { type });
 }
 
 export async function deleteVideo(key: string): Promise<void> {

@@ -80,6 +80,8 @@ const zhTW = {
     notesPlaceholder: '記錄這次揮桿的感覺、球的方向…',
     title: '標題',
     predictError: '預測誤差',
+    playFailed: '影片無法播放',
+    videoLoadFailed: '影片載入失敗，這台裝置的瀏覽器可能不支援此影片格式',
   },
   layer: {
     skeleton: '人體骨架',

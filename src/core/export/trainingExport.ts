@@ -1,6 +1,6 @@
 import { zipSync, strToU8, type Zippable } from 'fflate';
 import { db } from '../../storage/db';
-import { getVideo } from '../../storage/videoStore';
+import { getPlayableVideo } from '../../storage/videoStore';
 import { loadVideo, seekVideo, withTimeout } from '../video/videoElement';
 
 /**
@@ -18,7 +18,7 @@ export async function exportTrainingData(onProgress?: (done: number, total: numb
   for (const [sid, rows] of bySession) {
     const s = await db.sessions.get(sid);
     if (!s) continue;
-    const blob = await getVideo(s.video.storageKey);
+    const blob = await getPlayableVideo(s.video.storageKey, s.video.mimeType);
     if (!blob) continue;
     const { video: v, dispose } = await loadVideo(blob);
     try {

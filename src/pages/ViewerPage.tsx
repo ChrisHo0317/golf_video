@@ -12,7 +12,7 @@ import { analyze, type AnalysisResult } from '../core/pipeline';
 import { exportAnnotatedVideo, nearestFrame } from '../overlay/exportVideo';
 import { renderOverlay, screenToVideo } from '../overlay/renderer';
 import { db, loadFrames, saveSession } from '../storage/db';
-import { getVideo } from '../storage/videoStore';
+import { getPlayableVideo } from '../storage/videoStore';
 import { useSettings } from '../store/settings';
 import { ClubSource, type FrameData, type Phases, type SessionRecord } from '../types';
 
@@ -25,6 +25,9 @@ interface Loaded {
   fd: FrameData;
   blob: Blob;
   url: string;
+  /** 給 <video> 的網址（含起始時間片段） */
+  src: string;
+  poster: string;
 }
 
 export default function ViewerPage() {
@@ -43,6 +46,7 @@ export default function ViewerPage() {
   const [editClub, setEditClub] = useState(false);
   const [exporting, setExporting] = useState<number | null>(null);
   const [zoom, setZoom] = useState(NO_ZOOM);
+  const [videoError, setVideoError] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -52,24 +56,29 @@ export default function ViewerPage() {
   // ---- 載入 ----
   useEffect(() => {
     let url = '';
+    let poster = '';
     let cancelled = false;
     (async () => {
       const session = await db.sessions.get(id);
       if (!session) throw new Error(t('viewer.notFound'));
-      const [fd, blob] = await Promise.all([loadFrames(id), getVideo(session.video.storageKey)]);
+      const [fd, blob] = await Promise.all([loadFrames(id), getPlayableVideo(session.video.storageKey, session.video.mimeType)]);
       if (!fd) throw new Error(t('viewer.notFound'));
       if (!blob) throw new Error(t('viewer.videoMissing'));
       if (cancelled) return;
       url = URL.createObjectURL(blob);
+      if (session.thumbnail) poster = URL.createObjectURL(session.thumbnail);
       const { width: W, height: H } = session.video;
       const res = analyze(fd, session.capture, W, H, session.phasesManual ? session.phases : null);
-      setData({ session, fd, blob, url });
+      // 媒體片段 #t= 讓 iOS Safari 載入後直接顯示該格，而不是黑畫面
+      const startAt = res ? fd.mediaT[res.phases.address] : 0;
+      setData({ session, fd, blob, url, src: `${url}#t=${startAt.toFixed(3)}`, poster });
       setResult(res);
       if (res) setFrame(res.phases.address);
     })().catch((e) => setError(e instanceof Error ? e.message : String(e)));
     return () => {
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
+      if (poster) URL.revokeObjectURL(poster);
     };
   }, [id, t]);
 
@@ -78,16 +87,30 @@ export default function ViewerPage() {
   const fd = data?.fd;
 
   // ---- 影片與影格同步 ----
+  /** iOS 在使用者操作前不會載入影片畫面：在點擊當下靜音播放一下，讓它開始載入 */
+  const ensureLoaded = useCallback((v: HTMLVideoElement) => {
+    if (v.readyState >= 2) return;
+    v.muted = true;
+    const p = v.play();
+    if (p) p.then(() => v.pause()).catch(() => undefined);
+  }, []);
+
   const seekFrame = useCallback(
     (f: number) => {
       const v = videoRef.current;
       if (!fd || !v) return;
       const ff = Math.max(0, Math.min(fd.n - 1, f));
+      ensureLoaded(v);
       v.pause();
       setFrame(ff);
-      v.currentTime = fd.mediaT[ff] + 0.0005;
+      const apply = () => {
+        v.currentTime = fd.mediaT[ff] + 0.0005;
+      };
+      // 影片資訊還沒載入時設定時間會被忽略
+      if (v.readyState >= 1) apply();
+      else v.addEventListener('loadedmetadata', apply, { once: true });
     },
-    [fd],
+    [fd, ensureLoaded],
   );
 
   useEffect(() => {
@@ -124,8 +147,13 @@ export default function ViewerPage() {
     v.addEventListener('play', onPlay);
     v.addEventListener('pause', onPause);
     v.addEventListener('ended', onPause);
-    v.currentTime = fd.mediaT[result.phases.address] + 0.0005;
+    const initial = () => {
+      v.currentTime = fd.mediaT[result.phases.address] + 0.0005;
+    };
+    if (v.readyState >= 1) initial();
+    else v.addEventListener('loadedmetadata', initial, { once: true });
     return () => {
+      v.removeEventListener('loadedmetadata', initial);
       if (useRvfc) v.cancelVideoFrameCallback(handle);
       cancelAnimationFrame(raf);
       v.removeEventListener('play', onPlay);
@@ -294,8 +322,10 @@ export default function ViewerPage() {
   const togglePlay = () => {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) void v.play();
-    else v.pause();
+    if (v.paused) {
+      v.muted = true;
+      v.play().catch((e: unknown) => setVideoError(`${t('viewer.playFailed')} (${e instanceof Error ? e.name : String(e)})`));
+    } else v.pause();
   };
 
   // ---- 匯出 ----
@@ -360,7 +390,19 @@ export default function ViewerPage() {
           onDoubleClick={() => setZoom(NO_ZOOM)}
         >
           <div className="zoom-layer" style={{ transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.k})` }}>
-            <video ref={videoRef} src={data.url} muted playsInline preload="auto" />
+            <video
+              ref={videoRef}
+              src={data.src}
+              poster={data.poster || undefined}
+              muted
+              playsInline
+              preload="auto"
+              onError={() => {
+                const code = videoRef.current?.error?.code;
+                setVideoError(`${t('viewer.videoLoadFailed')}${code ? ` (code ${code})` : ''}`);
+              }}
+              onLoadedData={() => setVideoError(null)}
+            />
             <canvas ref={canvasRef} />
           </div>
           <div className="stage-tools" onClick={(e) => e.stopPropagation()}>
@@ -404,6 +446,7 @@ export default function ViewerPage() {
             {fd.t[frame].toFixed(3)}s · #{frame + 1}/{fd.n}
           </span>
         </div>
+        {videoError && <div className="notice error">{videoError}</div>}
         <Timeline n={fd.n} frame={frame} phases={result.phases} onSeek={seekFrame} />
         <div className="phase-jumps">
           {phasesKeys.map((k) => (
