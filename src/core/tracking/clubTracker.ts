@@ -1,4 +1,4 @@
-import { CAND_FROM_MODEL, CAND_OUT_OF_FRAME, CLUB_CANDS, ClubSource, type FrameData, type Handedness } from '../../types';
+import { CAND_FROM_MODEL, CAND_HEAD, CAND_OUT_OF_FRAME, CLUB_CANDS, ClubSource, type FrameData, type Handedness } from '../../types';
 import { LM, dist, handsCenter, lm, mid, shoulderCenter, sides, vis, type Pt } from '../landmarks';
 import { gaussianSmooth, rtsSmoothCA } from './filters';
 
@@ -34,6 +34,8 @@ interface Cand {
   r: number;
   conf: number;
   oof: boolean;
+  /** 沿桿身找到了桿頭（長度可信） */
+  head: boolean;
   src: number;
 }
 
@@ -55,12 +57,20 @@ const Q_THETA = (6000 * DEG * 30) ** 2;
 /** 有慣性歷史時，非慣性運動模型的額外成本 */
 const INERTIA_BIAS = 1.5;
 /** 輸出軌跡的平滑強度（秒）：高速段保留真實動作，慢速段（準備、頂點、收桿）加強平滑 */
-const SMOOTH_ANGLE_FAST = 0.03;
+const SMOOTH_ANGLE_FAST = 0.015;
 const SMOOTH_ANGLE_SLOW = 0.08;
-const SMOOTH_LEN_FAST = 0.06;
-const SMOOTH_LEN_SLOW = 0.15;
+const SMOOTH_LEN_FAST = 0.02;
+const SMOOTH_LEN_SLOW = 0.08;
+/** 找到桿頭的格保留自身長度的權重 */
+const LEN_ANCHOR = 8;
+/** 慢速段降低量測自身權重的比例 */
+const SLOW_PIN_RELAX = 0.8;
 /** 桿長比例的過程雜訊強度 */
 const Q_LEN = 400;
+/** 前後量測的角度差超過此值時，視為桿頭在畫面上穿過手部附近 */
+const BIG_TURN = 100 * DEG;
+/** 桿頭最大移動速度（手到桿頭距離 / 秒） */
+const MAX_HEAD_SPEED_L = 48;
 
 const wrap = (d: number) => {
   while (d > Math.PI) d -= 2 * Math.PI;
@@ -176,7 +186,8 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       const oof = (c.flags & CAND_OUT_OF_FRAME) !== 0;
       if (!manual && !oof && (r < 0.35 * L || r > 1.5 * L)) continue;
       const theta = Math.atan2(c.y - hands[f].y, c.x - hands[f].x);
-      out.push({ x: c.x, y: c.y, psi: wrap(theta - arm[f]), theta, r, conf: c.conf, oof, src: c.src });
+      const head = manual || c.src === ClubSource.Model || (c.flags & CAND_HEAD) !== 0;
+      out.push({ x: c.x, y: c.y, psi: wrap(theta - arm[f]), theta, r, conf: c.conf, oof, head, src: c.src });
     }
     return out;
   });
@@ -193,6 +204,8 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   const rLen = new Float64Array(n).fill(NaN);
   const measSrc = new Uint8Array(n).fill(ClubSource.None);
   const selConf = new Float64Array(n);
+  const selHeadR = new Float64Array(n).fill(NaN);
+  const selR = new Float64Array(n).fill(NaN);
   let prevPsi = NaN;
   let prevTheta = NaN;
   let prevF = -1;
@@ -217,10 +230,14 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     rPsi[f] = manual ? (1 * DEG) ** 2 : (SIGMA_MEAS / Math.max(c.conf, 0.05)) ** 2;
     measSrc[f] = c.src;
     selConf[f] = c.conf;
-    // 明顯偏短的長度多半是末端判斷失敗，不當作長度量測（人工標記除外）
-    if (!c.oof && (manual || c.r >= 0.8 * L)) {
+    // 明顯偏短的長度多半是末端判斷失敗，不當作長度量測（人工標記與找到桿頭的除外）
+    // 桿頭位置可信（找到桿頭，或貼著畫面邊緣的出界估計）：輸出時直接採用量到的長度
+    if (c.head || c.oof) selHeadR[f] = c.r;
+    selR[f] = c.r;
+    if (manual || c.head || c.oof || c.r >= 0.8 * L) {
       zLen[f] = c.r / L;
-      rLen[f] = manual ? 0.0004 : (0.05 / Math.max(c.conf, 0.05)) ** 2;
+      // 出界的長度是估計值，權重較低
+      rLen[f] = manual ? 0.0004 : ((c.oof ? 0.12 : 0.05) / Math.max(c.conf, 0.05)) ** 2;
     }
   }
 
@@ -237,12 +254,20 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     const at = Math.abs(zTheta[f] - thSm.x[f]);
     return rp <= rt ? { z: rp, abs: ap, psiBetter: true } : { z: rt, abs: at, psiBetter: false };
   };
+  /** 前後最近的有效量測之間角度差很大（桿身指向鏡頭、桿頭在畫面上穿過手部附近）：角度模型不適用 */
+  const bigTurnAround = (f: number) => {
+    let a = f - 1;
+    while (a >= 0 && Number.isNaN(zTheta[a])) a--;
+    let b = f + 1;
+    while (b < n && Number.isNaN(zTheta[b])) b++;
+    return a >= 0 && b < n && Math.abs(zTheta[b] - zTheta[a]) > BIG_TURN;
+  };
   for (let pass = 0; pass < 2; pass++) {
     let removed = 0;
     for (let f = 0; f < n; f++) {
       if (Number.isNaN(zPsi[f]) || measSrc[f] === ClubSource.Manual) continue;
       // 非常清晰的偵測已通過路徑連續性檢查，不因慣性模型跟不上而剔除
-      if (selConf[f] >= 0.9) continue;
+      if (selConf[f] >= 0.75 || bigTurnAround(f)) continue;
       const r = residual(f);
       if (r.z > 3 && r.abs > 15 * DEG) {
         zPsi[f] = NaN;
@@ -275,6 +300,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   const thetaF = new Float64Array(n);
   const rF = new Float64Array(n);
   const pin = new Float64Array(n).fill(1);
+  const pinLen = new Float64Array(n).fill(1);
   // 最近的人工標記：人工標記夾住的短缺口，以標記內插為準（忽略期間的自動偵測）
   const prevManual = new Int32Array(n).fill(-1);
   const nextManual = new Int32Array(n).fill(-1);
@@ -309,6 +335,11 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       const res = residual(f);
       if (selConf[f] >= 0.6 || res.abs > 10 * DEG) theta = zTheta[f];
       else if (!res.psiBetter) theta = thSm.x[f];
+      // 找到桿頭的量測：直接採用量到的長度
+      if (Number.isFinite(selHeadR[f]) && selConf[f] >= 0.4) {
+        r = selHeadR[f];
+        pinLen[f] = 1 + LEN_ANCHOR * selConf[f] * selConf[f];
+      }
       pin[f] = 1 + 8 * selConf[f] * selConf[f];
     } else if (label === ClubSource.Predicted && measSrc[prev] === ClubSource.Manual && measSrc[next] === ClubSource.Manual) {
       // 前後都是人工標記：在兩個實際位置之間依時間線性內插角度與長度，避免慣性模型過衝
@@ -317,6 +348,21 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       const rp = zLen[prev] * L;
       const rn = zLen[next] * L;
       if (Number.isFinite(rp) && Number.isFinite(rn)) r = rp + (rn - rp) * u;
+    } else if (
+      label === ClubSource.Predicted &&
+      Math.abs(zTheta[next] - zTheta[prev]) > BIG_TURN &&
+      Math.min(selR[prev], selR[next]) < 0.6 * L &&
+      t[next] - t[prev] <= 0.15
+    ) {
+      // 短缺口前後角度差很大、且一端桿身明顯縮短（指向鏡頭）：桿頭在畫面上是從手部附近「穿過」，
+      // 以直角座標（相對雙手）內插，避免以角度內插繞一大圈
+      const u = (t[f] - t[prev]) / Math.max(t[next] - t[prev], 1e-6);
+      const rp = selR[prev];
+      const rn = selR[next];
+      const vx = Math.cos(zTheta[prev]) * rp * (1 - u) + Math.cos(zTheta[next]) * rn * u;
+      const vy = Math.sin(zTheta[prev]) * rp * (1 - u) + Math.sin(zTheta[next]) * rn * u;
+      theta = Math.atan2(vy, vx);
+      r = Math.max(0.15 * L, Math.hypot(vx, vy));
     } else if (label === ClubSource.Predicted && Math.abs(zPsi[next] - zPsi[prev]) > 30 * DEG) {
       // 缺口前後手腕角變化大：桿身不是跟著手臂轉，改用絕對角度的慣性推估
       theta = thSm.x[f];
@@ -332,6 +378,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       theta = Math.atan2(my - hands[f].y, mx - hands[f].x);
       r = Math.hypot(mx - hands[f].x, my - hands[f].y);
       pin[f] = 1e6;
+      pinLen[f] = 1e6;
     }
     // 角度連續化
     thetaF[f] = f > 0 ? thetaF[f - 1] + wrap(theta - thetaF[f - 1]) : theta;
@@ -343,6 +390,7 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   // 自適應高斯平滑：依雙手速度（前後各取鄰近最大值，避免在加速起點過度平滑）決定強度
   const sigA = new Float64Array(n);
   const sigL = new Float64Array(n);
+  const slowness = new Float64Array(n);
   const reachFrames = Math.max(1, Math.round(fps * 0.05));
   // 桿身角速度（每秒 300° 視為高速）
   const angFast = new Float64Array(n);
@@ -355,11 +403,19 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     let sp = 0;
     for (let j = Math.max(0, f - reachFrames); j <= Math.min(n - 1, f + reachFrames); j++) sp = Math.max(sp, speedNorm[j], angFast[j]);
     const slow = Math.max(0, Math.min(1, (0.5 - sp) / 0.4));
+    slowness[f] = slow;
     sigA[f] = SMOOTH_ANGLE_FAST + (SMOOTH_ANGLE_SLOW - SMOOTH_ANGLE_FAST) * slow;
     sigL[f] = SMOOTH_LEN_FAST + (SMOOTH_LEN_SLOW - SMOOTH_LEN_FAST) * slow;
   }
+  // 慢速段：前後格幾乎相同，量測雜訊靠平滑消除（降低自身權重）；高速段：前後格差異大，以量測為準
+  for (let f = 0; f < n; f++) {
+    if (src[f] === ClubSource.Manual) continue;
+    const k = 1 - SLOW_PIN_RELAX * slowness[f];
+    pin[f] = 1 + (pin[f] - 1) * k;
+    pinLen[f] = 1 + (pinLen[f] - 1) * k;
+  }
   const thetaS = gaussianSmooth(thetaF, t, sigA, pin);
-  const rS = gaussianSmooth(rF, t, sigL, pin);
+  const rS = gaussianSmooth(rF, t, sigL, pinLen);
   for (let f = 0; f < n; f++) {
     if (src[f] === ClubSource.Manual) {
       // 人工標記是實際位置，不做平滑
@@ -456,8 +512,9 @@ function selectPath(
           const base = best[f - g][j];
           if (!Number.isFinite(base)) continue;
           const p = pl[j];
-          // 桿身絕對角速度上限約 3000°/s
-          if (c.src !== ClubSource.Manual && Math.abs(wrap(c.theta - p.theta)) / dt > 3000 * DEG) continue;
+          // 桿頭位移上限（每秒約 48 倍手到桿頭距離，約 50 m/s）。不用角速度上限：
+          // 擊球前後桿身接近指向鏡頭時，畫面上的角度一格可轉 150° 以上
+          if (c.src !== ClubSource.Manual && Math.hypot(c.x - p.x, c.y - p.y) / dt > MAX_HEAD_SPEED_L * L) continue;
           // 兩種合理運動取其一：桿身跟著手臂轉（手腕角不變），或桿身滯後（絕對角度不變）
           const dTheta = wrap(c.theta - p.theta);
           let smooth = Math.min(huber(wrap(c.psi - p.psi) / sigma), huber(dTheta / sigma));

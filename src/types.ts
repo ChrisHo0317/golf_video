@@ -92,6 +92,8 @@ export const CAND_STRIDE = 5;
 export const CAND_OUT_OF_FRAME = 1;
 /** 候選旗標：來自 YOLO 模型 */
 export const CAND_FROM_MODEL = 2;
+/** 候選旗標：沿桿身找到了桿頭（長度可信） */
+export const CAND_HEAD = 4;
 
 /** 逐格資料（以 TypedArray 儲存），座標為 0..1 正規化（旋轉後畫面） */
 export interface FrameData {
