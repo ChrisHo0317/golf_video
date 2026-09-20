@@ -225,13 +225,14 @@ export class ShaftDetector {
         // 桿身一路延伸到畫面邊界：桿頭在邊界上或畫面外，以過去量到的桿長估算（最多超出邊界 0.04L：
         // 多半只是桿頭貼著邊緣，且桿身因透視縮短時過去的桿長會高估）
         const q = tr.point(tr.exitAt + Math.min(Math.max(0, this.lenRatio() * L - tr.exitAt), 0.04 * L));
-        push(q.x, q.y, lineConf * 0.85, CAND_OUT_OF_FRAME);
+        // 追蹤支撐度低（可能只是沿著樹林、網子等暗色結構走到邊界）時不可信
+        if (tr.conf > 0.25) push(q.x, q.y, lineConf * (0.35 + 0.5 * tr.conf), CAND_OUT_OF_FRAME);
         continue;
       }
       if (tr.conf > 0) {
         let q = tr.point(tr.end);
         // 桿身末端是桿頸：最強的兩條線再往附近找桿頭區塊的中心
-        if (pi < 2) q = refineHead(at, q.x, q.y, Math.cos(th), Math.sin(th), L) ?? q;
+        if (pi < 2) q = refineHeadSeg(at, q.x, q.y, Math.cos(th), Math.sin(th), L) ?? refineHead(at, q.x, q.y, Math.cos(th), Math.sin(th), L) ?? q;
         push(q.x, q.y, lineConf * (0.6 + 0.4 * tr.conf), tr.conf > 0.3 ? CAND_HEAD : 0);
         if (pi === 0 && tr.conf > 0.6) {
           this.lenRatios.push(tr.end / L);
@@ -514,6 +515,125 @@ function traceShaft(at: (x: number, y: number) => number, ox: number, oy: number
   const support = total ? hits / total : 0;
   const conf = !Number.isFinite(last) || last < 0.3 * L || ref <= 0 ? 0 : Math.min(1, Math.max(0, (support - 0.3) / 0.5));
   return { end: last, exitAt, outOfFrame, conf, point };
+}
+
+/**
+ * 桿頭中心（區域分割）：以桿身自身的對比當作門檻，從末端往外分割出與桿身同明暗方向的區塊
+ * （旁邊的球與桿頭明暗相反，不會併進來），開運算去掉細桿身後取形心。
+ */
+function refineHeadSeg(at: (x: number, y: number) => number, ex: number, ey: number, dirx: number, diry: number, L: number) {
+  const half = Math.max(8, Math.round(0.13 * L));
+  const S = 2 * half + 1;
+  const x0 = Math.round(ex + dirx * 0.04 * L) - half;
+  const y0 = Math.round(ey + diry * 0.04 * L) - half;
+  const g = new Float32Array(S * S);
+  const valid = new Uint8Array(S * S);
+  const border: number[] = [];
+  for (let j = 0; j < S; j++)
+    for (let i = 0; i < S; i++) {
+      const v = at(x0 + i, y0 + j);
+      if (Number.isNaN(v)) continue;
+      const k = j * S + i;
+      g[k] = v;
+      valid[k] = 1;
+      if (i === 0 || j === 0 || i === S - 1 || j === S - 1) border.push(v);
+    }
+  if (border.length < S) return null;
+  border.sort((a, b) => a - b);
+  const bg = border[border.length >> 1];
+  // 桿身末端一小段的對比與明暗方向
+  const shaft: number[] = [];
+  for (let t = 0; t <= Math.round(0.12 * L); t++) {
+    const v = at(ex - dirx * t, ey - diry * t);
+    if (!Number.isNaN(v)) shaft.push(v - bg);
+  }
+  if (shaft.length < 5) return null;
+  const sorted = [...shaft].sort((a, b) => a - b);
+  const mid = sorted[sorted.length >> 1];
+  const sign = mid >= 0 ? 1 : -1;
+  const contrast = Math.abs(mid);
+  if (contrast < 6) return null;
+  const thr = Math.max(5, 0.35 * contrast);
+  let mask = new Uint8Array(S * S);
+  for (let k = 0; k < S * S; k++) mask[k] = valid[k] && sign * (g[k] - bg) > thr ? 1 : 0;
+  // 開運算：去掉比桿身略粗以下的細結構
+  const kr = Math.max(1, Math.round(0.012 * L));
+  const morph = (src: Uint8Array, erode: boolean) => {
+    const tmp = new Uint8Array(S * S);
+    const out = new Uint8Array(S * S);
+    for (let j = 0; j < S; j++)
+      for (let i = 0; i < S; i++) {
+        let v = erode ? 1 : 0;
+        for (let t = -kr; t <= kr; t++) {
+          const ii = i + t;
+          if (ii < 0 || ii >= S) continue;
+          v = erode ? Math.min(v, src[j * S + ii]) : Math.max(v, src[j * S + ii]);
+        }
+        tmp[j * S + i] = v;
+      }
+    for (let j = 0; j < S; j++)
+      for (let i = 0; i < S; i++) {
+        let v = erode ? 1 : 0;
+        for (let t = -kr; t <= kr; t++) {
+          const jj = j + t;
+          if (jj < 0 || jj >= S) continue;
+          v = erode ? Math.min(v, tmp[jj * S + i]) : Math.max(v, tmp[jj * S + i]);
+        }
+        out[j * S + i] = v;
+      }
+    return out;
+  };
+  mask = morph(morph(mask, true), false);
+  const px = Math.round(ex) - x0;
+  const py = Math.round(ey) - y0;
+  let seed = -1;
+  let bestD = Infinity;
+  for (let j = 0; j < S; j++)
+    for (let i = 0; i < S; i++) {
+      if (!mask[j * S + i]) continue;
+      const d = (i - px) ** 2 + (j - py) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        seed = j * S + i;
+      }
+    }
+  if (seed < 0 || bestD > (0.05 * L) ** 2) return null;
+  const queue = [seed];
+  const seen = new Uint8Array(S * S);
+  seen[seed] = 1;
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  let touchesEdge = false;
+  let minI = S;
+  let maxI = 0;
+  let minJ = S;
+  let maxJ = 0;
+  while (queue.length) {
+    const k = queue.pop()!;
+    const i = k % S;
+    const j = (k - i) / S;
+    if (i === 0 || j === 0 || i === S - 1 || j === S - 1) touchesEdge = true;
+    if (i < minI) minI = i;
+    if (i > maxI) maxI = i;
+    if (j < minJ) minJ = j;
+    if (j > maxJ) maxJ = j;
+    sx += i;
+    sy += j;
+    n++;
+    if (i > 0 && mask[k - 1] && !seen[k - 1]) ((seen[k - 1] = 1), queue.push(k - 1));
+    if (i < S - 1 && mask[k + 1] && !seen[k + 1]) ((seen[k + 1] = 1), queue.push(k + 1));
+    if (j > 0 && mask[k - S] && !seen[k - S]) ((seen[k - S] = 1), queue.push(k - S));
+    if (j < S - 1 && mask[k + S] && !seen[k + S]) ((seen[k + S] = 1), queue.push(k + S));
+  }
+  // 區塊太小（雜訊）、太大或延伸到視窗邊界（天空、樹林、身體等整片背景）都不採用
+  if (n < 10 || n > 0.02 * L * L || touchesEdge) return null;
+  // 桿頭的外接框不會比桿長的 1/4 更大
+  if (maxI - minI > 0.25 * L || maxJ - minJ > 0.25 * L) return null;
+  const hx = x0 + sx / n;
+  const hy = y0 + sy / n;
+  if (Math.hypot(hx - ex, hy - ey) > 0.1 * L) return null;
+  return { x: hx, y: hy };
 }
 
 /**

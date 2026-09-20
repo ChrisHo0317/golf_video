@@ -11,3 +11,4 @@ training/*.pt
 public/models/*.task
 .claude/settings.local.json
 00_data/
+*.tsbuildinfo

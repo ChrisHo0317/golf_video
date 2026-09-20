@@ -1,4 +1,6 @@
-import { defineConfig } from 'vite';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
@@ -7,11 +9,36 @@ const base = process.env.BASE_PATH ?? '/';
 
 import pkg from './package.json' with { type: 'json' };
 
+/** 開發用：讓瀏覽器端的準確度評估把結果寫到 00_data/eval/（僅開發伺服器，檔名限制為英數與 . _ -） */
+const devSave = (): Plugin => ({
+  name: 'dev-save',
+  apply: 'serve',
+  configureServer(server) {
+    server.middlewares.use('/__dev/save', (req, res) => {
+      const name = new URL(req.url ?? '', 'http://x').searchParams.get('name') ?? '';
+      if (req.method !== 'POST' || !/^[\w.-]+$/.test(name)) {
+        res.statusCode = 400;
+        res.end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const dir = resolve(process.cwd(), '00_data/eval');
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(resolve(dir, name), Buffer.concat(chunks));
+        res.end('ok');
+      });
+    });
+  },
+});
+
 export default defineConfig({
   base,
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   plugins: [
     react(),
+    devSave(),
     VitePWA({
       registerType: 'prompt',
       includeAssets: ['icon.svg'],
