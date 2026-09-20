@@ -14,6 +14,12 @@ const devSave = (): Plugin => ({
   name: 'dev-save',
   apply: 'serve',
   configureServer(server) {
+    // onnxruntime-web 會動態 import public/wasm 下的 .mjs，Vite 開發伺服器會補上 ?import 而失敗；
+    // 這裡把查詢字串去掉，直接回傳原檔
+    server.middlewares.use((req, _res, next) => {
+      if (req.url?.startsWith('/wasm/') && req.url.includes('?')) req.url = req.url.split('?')[0];
+      next();
+    });
     server.middlewares.use('/__dev/save', (req, res) => {
       const name = new URL(req.url ?? '', 'http://x').searchParams.get('name') ?? '';
       if (req.method !== 'POST' || !/^[\w.-]+$/.test(name)) {

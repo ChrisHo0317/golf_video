@@ -69,8 +69,8 @@ const SLOW_PIN_RELAX = 0.8;
 const Q_LEN = 400;
 /** 前後量測的角度差超過此值時，視為桿頭在畫面上穿過手部附近 */
 const BIG_TURN = 100 * DEG;
-/** 桿頭最大移動速度（手到桿頭距離 / 秒） */
-const MAX_HEAD_SPEED_L = 48;
+/** 桿頭最大移動速度（手到桿頭距離 / 秒）：擊球瞬間 30fps 下一格可移動超過 1.5 倍桿長 */
+const MAX_HEAD_SPEED_L = 72;
 
 const wrap = (d: number) => {
   while (d > Math.PI) d -= 2 * Math.PI;
@@ -184,7 +184,10 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
       if (!manual && c.conf < minConf) continue;
       const r = dist(c, hands[f]);
       const oof = (c.flags & CAND_OUT_OF_FRAME) !== 0;
-      if (!manual && !oof && (r < 0.35 * L || r > 1.5 * L)) continue;
+      // 影像桿身偵測若量到的長度過短，多半是末端判斷失敗；模型是直接認出桿頭，
+      // 桿身指向鏡頭時桿頭本來就會落在雙手附近，只排除明顯不合理的距離
+      const minR = c.src === ClubSource.Model ? 0.05 : 0.35;
+      if (!manual && !oof && (r < minR * L || r > 1.5 * L)) continue;
       const theta = Math.atan2(c.y - hands[f].y, c.x - hands[f].x);
       const head = manual || c.src === ClubSource.Model || (c.flags & CAND_HEAD) !== 0;
       out.push({ x: c.x, y: c.y, psi: wrap(theta - arm[f]), theta, r, conf: c.conf, oof, head, src: c.src });

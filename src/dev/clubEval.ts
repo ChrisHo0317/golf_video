@@ -5,7 +5,7 @@
  * 只改追蹤器時不必重跑推論：await m.restoreAll(); m.evaluateAll();
  */
 import { runInference } from '../core/inference/runInference';
-import { handsCenter } from '../core/landmarks';
+import { LM, dist, handsCenter, lm, mid, shoulderCenter } from '../core/landmarks';
 import { analyze } from '../core/pipeline';
 import { smoothPose } from '../core/tracking/poseSmoothing';
 import type { CaptureInfo, FrameData, VideoMeta } from '../types';
@@ -30,18 +30,30 @@ export interface EvalRow {
 
 type Seg = 'static' | 'back' | 'down' | 'follow';
 
-/** 評估用影片（720×1280、約 30fps） */
-export const VIDEOS: { name: string; duration: number }[] = [
-  { name: '811257859.281721', duration: 9.305 },
-  { name: '811526255.326530', duration: 7.103 },
-  { name: '811526255.419161', duration: 7.337 },
-  { name: '811526255.595193', duration: 4.902 },
-  { name: '811526255.666065', duration: 8.008 },
-  { name: '811526255.728889', duration: 6.137 },
-  { name: '811526255.783496', duration: 5.603 },
+/** 評估與訓練資料用的影片（放在 00_data/，不進版控） */
+export const VIDEOS: { name: string; duration: number; w: number; h: number; fps: number; ext?: string }[] = [
+  { name: '811257859.281721', duration: 9.305, w: 720, h: 1280, fps: 30 },
+  { name: '811526255.326530', duration: 7.103, w: 720, h: 1280, fps: 30 },
+  { name: '811526255.419161', duration: 7.337, w: 720, h: 1280, fps: 30 },
+  { name: '811526255.595193', duration: 4.902, w: 720, h: 1280, fps: 30 },
+  { name: '811526255.666065', duration: 8.008, w: 720, h: 1280, fps: 30 },
+  { name: '811526255.728889', duration: 6.137, w: 720, h: 1280, fps: 30 },
+  { name: '811526255.783496', duration: 5.603, w: 720, h: 1280, fps: 30 },
+  { name: '14431eda-3323-4807-8622-4144495ddb99', duration: 11.147, w: 720, h: 1280, fps: 30 },
+  { name: '3e09cec1-ed23-4817-883a-1ec41ac91676', duration: 7.882, w: 720, h: 1280, fps: 30 },
+  { name: 'a4213018-bfe9-4f61-b829-3c4f8f773d3f', duration: 12.213, w: 720, h: 1280, fps: 30 },
+  { name: 'cc8b1160-dff6-4123-b59b-1d702fa35b95', duration: 12.147, w: 720, h: 1280, fps: 30 },
+  { name: 'e58d6484-4ffd-4e2e-8ee9-cbdf5739a390', duration: 10.413, w: 720, h: 1280, fps: 30 },
+  { name: '2a74f953-c603-434e-ae55-bc26327785fd', duration: 5.103, w: 2160, h: 3840, fps: 60 },
+  { name: '33316944-f3a0-4776-9467-2c020f684993', duration: 7.438, w: 2160, h: 3840, fps: 60 },
+  { name: '6582dbce-84f2-42b2-bbc0-a819728f9a56', duration: 4.387, w: 2160, h: 3840, fps: 60 },
+  { name: '20260920_164245', duration: 5.767, w: 1080, h: 1920, fps: 60, ext: 'MP4' },
+  { name: '20260920_164303', duration: 6.833, w: 1080, h: 1920, fps: 60, ext: 'MP4' },
 ];
-const W = 720;
-const H = 1280;
+const sizeOf = (name: string) => {
+  const v = VIDEOS.find((x) => x.name === name)!;
+  return { W: v.w, H: v.h };
+};
 
 // 存在 globalThis：模組因 HMR 重新載入時仍保留推論結果
 const G = globalThis as { __clubEvalCache?: Map<string, FrameData> };
@@ -59,15 +71,15 @@ async function labelsOf(name: string): Promise<EvalLabel[] | null> {
 /** 重跑完整推論（偵測器有改動時用），結果快取並存進 IndexedDB */
 export async function infer(name: string): Promise<FrameData> {
   const v = VIDEOS.find((x) => x.name === name)!;
-  const file = await (await fetch(`/00_data/${name}.mp4`)).blob();
+  const file = await (await fetch(`/00_data/${name}.${v.ext ?? 'mp4'}`)).blob();
   const video: VideoMeta = {
     storageKey: 'eval',
     fileName: `${name}.mp4`,
     mimeType: 'video/mp4',
     durationSec: v.duration,
-    fps: 30,
-    width: W,
-    height: H,
+    fps: v.fps,
+    width: v.w,
+    height: v.h,
     rotation: 0,
     slowMoFactor: 1,
     trimStart: 0,
@@ -96,6 +108,7 @@ export async function evaluate(name: string) {
   const fd = cache.get(name);
   const labels = await labelsOf(name);
   if (!fd || !labels) return null;
+  const { W, H } = sizeOf(name);
   analyze(fd, capture, W, H);
   const rows: EvalRow[] = [];
   for (const l of labels) {
@@ -153,12 +166,17 @@ export async function runAll(names = VIDEOS.map((v) => v.name)) {
 export async function savePred(name: string) {
   const fd = cache.get(name);
   if (!fd) return;
+  const { W, H } = sizeOf(name);
   analyze(fd, capture, W, H);
   const r = (v: number) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
   const frames = [];
   for (let f = 0; f < fd.n; f++) {
     const h = handsCenter(fd, f, W, H);
-    frames.push({ f, t: r(fd.t[f]), x: r(fd.club[f * 2] * W), y: r(fd.club[f * 2 + 1] * H), src: fd.clubSource[f], hx: r(h.x), hy: r(h.y) });
+    // 軀幹長度：App 以「雙手為中心、邊長 5.5 倍軀幹」的正方形送進模型，產生訓練圖時要一致
+    const torso = dist(shoulderCenter(fd, f, W, H), mid(lm(fd, f, LM.leftHip, W, H), lm(fd, f, LM.rightHip, W, H)));
+    const x = fd.club[f * 2] * W;
+    const y = fd.club[f * 2 + 1] * H;
+    frames.push({ f, t: r(fd.t[f]), x: r(x), y: r(y), src: fd.clubSource[f], hx: r(h.x), hy: r(h.y), r: r(Math.hypot(x - h.x, y - h.y)), torso: r(torso) });
   }
   await fetch(`/__dev/save?name=${name}_pred.json`, { method: 'POST', body: JSON.stringify({ name, W, H, frames }) });
 }

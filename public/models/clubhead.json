@@ -1,0 +1,8 @@
+{
+  "version": "yolo11n-clubhead-v1",
+  "inputSize": 640,
+  "classNames": [
+    "club_head"
+  ],
+  "clubClass": 0
+}

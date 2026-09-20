@@ -12,3 +12,8 @@ public/models/*.task
 .claude/settings.local.json
 00_data/
 *.tsbuildinfo
+training/datasets/
+training/runs/
+00_data/eval/
+/runs/
+/weights/
