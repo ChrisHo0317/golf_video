@@ -10,6 +10,11 @@ const en: Dict = {
     favorite: 'Favorite',
     delete: 'Delete',
     confirmDelete: 'Delete "{{title}}"? The video and analysis cannot be recovered.',
+    select: 'Select',
+    selectAll: 'Select all',
+    deselectAll: 'Deselect all',
+    deleteSelected: 'Delete {{n}}',
+    confirmDeleteMany: 'Delete the {{n}} selected records? The videos and analyses cannot be recovered.',
     unanalyzed: 'Analysis not finished',
   },
   upload: {

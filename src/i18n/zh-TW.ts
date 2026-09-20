@@ -8,6 +8,11 @@ const zhTW = {
     favorite: '收藏',
     delete: '刪除',
     confirmDelete: '確定要刪除「{{title}}」？影片與分析資料將無法復原。',
+    select: '選取',
+    selectAll: '全選',
+    deselectAll: '取消全選',
+    deleteSelected: '刪除 {{n}} 筆',
+    confirmDeleteMany: '確定要刪除選取的 {{n}} 筆紀錄？影片與分析資料將無法復原。',
     unanalyzed: '尚未完成分析',
   },
   upload: {

@@ -11,8 +11,11 @@
   --warn: #b7791f;
   --bad: #c0392b;
   --good: #1e8e50;
-  --radius: 14px;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 4px 16px rgba(0, 0, 0, 0.04);
+  --radius: 16px;
+  --radius-lg: 22px;
+  --radius-pill: 999px;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  --shadow-float: 0 2px 8px rgba(0, 0, 0, 0.06), 0 12px 32px rgba(0, 0, 0, 0.12);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   color-scheme: light;
 }
@@ -31,7 +34,8 @@
     --warn: #f0b64a;
     --bad: #ff7b6b;
     --good: #52d48f;
-    --shadow: none;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-float: 0 8px 28px rgba(0, 0, 0, 0.5);
     color-scheme: dark;
   }
 }
@@ -64,15 +68,16 @@ a {
 }
 
 .app {
-  min-height: 100dvh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .topbar {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 20;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -101,23 +106,70 @@ a {
 .main {
   flex: 1;
   width: 100%;
-  max-width: 1200px;
-  margin: 0 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 16px;
-  padding-bottom: calc(88px + var(--safe-bottom));
+  padding-bottom: calc(104px + var(--safe-bottom));
+}
+
+.main > * {
+  max-width: 1200px;
+  margin-inline: auto;
+}
+
+/* 下拉重新整理指示器 */
+.pull-indicator {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 52px);
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 15;
+  transition: opacity 0.2s ease;
+}
+
+.pull-spinner {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-float);
+}
+
+.pull-spinner.spin {
+  animation: pull-spin 0.8s linear infinite;
+}
+
+@keyframes pull-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .tabbar {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 20;
+  left: 50%;
+  bottom: calc(10px + var(--safe-bottom));
+  transform: translateX(-50%);
+  width: min(520px, calc(100% - 24px));
+  z-index: 30;
   display: flex;
-  justify-content: space-around;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  padding-bottom: var(--safe-bottom);
+  gap: 4px;
+  padding: 6px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  box-shadow: var(--shadow-float);
 }
 
 .tabbar a {
@@ -125,14 +177,23 @@ a {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 8px 0 6px;
-  font-size: 12px;
+  gap: 2px;
+  padding: 7px 0 6px;
+  font-size: 11px;
+  font-weight: 500;
   color: var(--text-2);
   text-decoration: none;
+  border-radius: var(--radius-pill);
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.tabbar a:active {
+  transform: scale(0.96);
 }
 
 .tabbar a.active {
   color: var(--accent);
+  background: var(--accent-2);
 }
 
 .tabbar svg {
@@ -146,14 +207,19 @@ a {
   justify-content: center;
   gap: 6px;
   min-height: 40px;
-  padding: 8px 14px;
-  border-radius: 10px;
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border);
+  transition: transform 0.12s ease, background 0.18s ease;
   background: var(--surface);
   cursor: pointer;
   text-decoration: none;
   color: var(--text);
   white-space: nowrap;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .btn:disabled {
@@ -197,8 +263,8 @@ a {
 
 .card {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: var(--radius-lg);
   padding: 16px;
   box-shadow: var(--shadow);
 }
@@ -237,8 +303,8 @@ a {
 .field select,
 .field textarea {
   width: 100%;
-  padding: 9px 10px;
-  border-radius: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--surface-2);
 }
@@ -252,26 +318,32 @@ a {
 .segmented {
   display: inline-flex;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-pill);
   overflow: hidden;
   flex-wrap: wrap;
+  background: var(--surface-2);
+  padding: 3px;
+  gap: 2px;
 }
 
 .segmented button {
   border: 0;
-  background: var(--surface);
-  padding: 7px 12px;
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
 }
 
 .segmented button[aria-pressed='true'] {
   background: var(--accent);
   color: var(--accent-text);
+  font-weight: 600;
 }
 
 .notice {
-  padding: 10px 12px;
-  border-radius: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
   background: var(--accent-2);
   font-size: 13px;
 }
@@ -309,9 +381,52 @@ a {
   width: 72px;
   height: 96px;
   object-fit: cover;
-  border-radius: 10px;
+  border-radius: 14px;
   background: var(--surface-2);
   flex-shrink: 0;
+}
+
+.session-card.select-row {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: start;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.card.session-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-2);
+}
+
+.session-card .check {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--border);
+  background: var(--surface);
+  position: relative;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.session-card .check.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.session-card .check.on::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid var(--accent-text);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
 }
 
 .session-card .info {
@@ -411,7 +526,7 @@ a {
   }
   .viewer .viewer-left {
     position: sticky;
-    top: 72px;
+    top: 0;
   }
 }
 
