@@ -808,6 +808,42 @@ table.data td:first-child {
   background: #000;
 }
 
+/* 新增頁：影片＋時間軸＋開始分析黏在頂端，往下看設定時不會被遮住 */
+.upload-stage {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  padding-bottom: 10px;
+  margin-bottom: -2px;
+}
+
+.upload-stage .preview-canvas {
+  max-height: min(34dvh, 360px);
+}
+
+.upload-stage .card {
+  box-shadow: var(--shadow-float);
+}
+
+.trim-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.chip.warn {
+  background: color-mix(in srgb, var(--warn) 22%, transparent);
+  color: var(--warn);
+}
+
+.btn.block {
+  width: 100%;
+}
+
+.pick-row .btn {
+  flex: 1;
+}
+
 .range-dual {
   position: relative;
   height: 36px;

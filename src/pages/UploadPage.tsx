@@ -111,20 +111,19 @@ export default function UploadPage() {
     <div className="stack">
       <h2 style={{ margin: 0 }}>{t('upload.title')}</h2>
 
-      <div className="card stack">
-        <div className="row">
-          <label className="btn primary">
-            {t('upload.pick')}
-            <input type="file" accept="video/*" hidden onChange={(e) => onFile(e.target.files?.[0])} />
-          </label>
-          <label className="btn">
-            <IconCamera size={18} /> {t('upload.record')}
-            <input type="file" accept="video/*" capture="environment" hidden onChange={(e) => onFile(e.target.files?.[0])} />
-          </label>
-          {file && <span className="muted">{file.name}</span>}
-        </div>
-        {error && <div className="notice error">{error}</div>}
-        {!file && (
+      {!file && (
+        <div className="card stack">
+          <div className="row pick-row">
+            <label className="btn primary">
+              {t('upload.pick')}
+              <input type="file" accept="video/*" hidden onChange={(e) => onFile(e.target.files?.[0])} />
+            </label>
+            <label className="btn">
+              <IconCamera size={18} /> {t('upload.record')}
+              <input type="file" accept="video/*" capture="environment" hidden onChange={(e) => onFile(e.target.files?.[0])} />
+            </label>
+          </div>
+          {error && <div className="notice error">{error}</div>}
           <div className="stack" style={{ gap: 4 }}>
             <strong>{t('upload.guideTitle')}</strong>
             <ul className="muted" style={{ margin: 0, paddingLeft: 18 }}>
@@ -134,23 +133,46 @@ export default function UploadPage() {
               <li>{t('upload.guide4')}</li>
             </ul>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {file && probe && url && (
         <>
-          <div className="card stack">
-            <video ref={videoRef} src={url} className="preview-canvas" muted playsInline controls preload="metadata" />
-            <div className="field">
-              <span>
-                {t('upload.trim')}: {trim[0].toFixed(2)}s – {trim[1].toFixed(2)}s ({span.toFixed(2)}s)
-              </span>
-              <RangeDual min={0} max={probe.durationSec} step={0.01} value={trim} onChange={onTrim} />
-              <span className="muted">{t('upload.trimHint')}</span>
+          {/* 影片、時間軸、開始分析同一區塊並黏在頂端，捲動看設定時仍看得到 */}
+          <div className="upload-stage">
+            <div className="card stack" style={{ gap: 10 }}>
+              <video ref={videoRef} src={url} className="preview-canvas" muted playsInline controls preload="metadata" />
+              <div className="stack" style={{ gap: 4 }}>
+                <div className="row" style={{ gap: 6 }}>
+                  <span className="muted">{t('upload.trim')}</span>
+                  <span className="trim-time">
+                    {trim[0].toFixed(2)}s – {trim[1].toFixed(2)}s
+                  </span>
+                  <span className={`chip ${span > 15 ? 'warn' : ''}`}>{span.toFixed(2)}s</span>
+                </div>
+                <RangeDual min={0} max={probe.durationSec} step={0.01} value={trim} onChange={onTrim} />
+              </div>
+              {error && <div className="notice error">{error}</div>}
+              {span > 15 && <div className="notice warn">{t('upload.tooLong')}</div>}
+              <button className="btn primary block" disabled={busy || span <= 0.3} onClick={start}>
+                {t('upload.analyze')}
+              </button>
             </div>
-            {span > 15 && <div className="notice warn">{t('upload.tooLong')}</div>}
-            <div className="muted">
-              {probe.width}×{probe.height} · {probe.fps} fps · {probe.durationSec.toFixed(1)}s{probe.codec ? ` · ${probe.codec}` : ''}
+          </div>
+
+          <div className="card stack">
+            <div className="row" style={{ gap: 6 }}>
+              <span className="muted" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {file.name} · {probe.width}×{probe.height} · {probe.fps} fps
+              </span>
+              <label className="btn small">
+                {t('upload.pick')}
+                <input type="file" accept="video/*" hidden onChange={(e) => onFile(e.target.files?.[0])} />
+              </label>
+              <label className="btn small">
+                <IconCamera size={16} /> {t('upload.record')}
+                <input type="file" accept="video/*" capture="environment" hidden onChange={(e) => onFile(e.target.files?.[0])} />
+              </label>
             </div>
           </div>
 
@@ -221,9 +243,9 @@ export default function UploadPage() {
             <p className="muted" style={{ margin: 0 }}>
               {t('upload.slowMoHint')}
             </p>
-            <button className="btn primary" disabled={busy || span <= 0.3} onClick={start}>
-              {t('upload.analyze')}
-            </button>
+            <p className="muted" style={{ margin: 0 }}>
+              {t('upload.trimHint')}
+            </p>
           </div>
         </>
       )}
