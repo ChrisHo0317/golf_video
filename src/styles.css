@@ -530,6 +530,23 @@ a {
   }
 }
 
+.player-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.player-bar .timeline {
+  flex: 1;
+  min-width: 0;
+}
+
+.play-btn {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+}
+
 .controls {
   display: flex;
   align-items: center;

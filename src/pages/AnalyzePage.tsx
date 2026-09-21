@@ -9,8 +9,10 @@ import { smoothPose } from '../core/tracking/poseSmoothing';
 import type { Thumb } from '../core/inference/runInference';
 import { canvasToJpeg, captureVideoFrame } from '../core/video/snapshot';
 import { withTimeout } from '../core/video/videoElement';
+import { sliceFrames, shiftPhases } from '../core/sliceFrames';
+import { trimVideo } from '../core/video/trimVideo';
 import { db, saveSession } from '../storage/db';
-import { getVideo } from '../storage/videoStore';
+import { getVideo, putVideo } from '../storage/videoStore';
 import { useSettings } from '../store/settings';
 import type { Quality } from './UploadPage';
 
@@ -36,6 +38,9 @@ async function makeThumbnail(thumbs: Thumb[], time: number, blob: Blob): Promise
   }
   return withTimeout(captureVideoFrame(blob, time), 8000, null);
 }
+
+/** 分析後保留的前後緩衝（秒） */
+const KEEP_PAD_SEC = 1;
 
 export default function AnalyzePage() {
   const { id = '' } = useParams();
@@ -98,17 +103,44 @@ export default function AnalyzePage() {
 
       setStage('saving');
       const thumbnail = await makeThumbnail(out.thumbs, fd.mediaT[res.phases.impact], blob);
+
+      // 只保留「準備前 1 秒」到「收桿後 1 秒」：影片重新封裝、逐格資料一併裁切
+      let saved = fd;
+      let phases = res.phases;
+      let video = session.video;
+      const keepFrom = fd.mediaT[res.phases.address] - KEEP_PAD_SEC;
+      const keepTo = fd.mediaT[res.phases.finish] + KEEP_PAD_SEC;
+      let from = 0;
+      let to = fd.n - 1;
+      while (from < res.phases.address && fd.mediaT[from] < keepFrom) from++;
+      while (to > res.phases.finish && fd.mediaT[to] > keepTo) to--;
+      if (from > 0 || to < fd.n - 1) {
+        const trimmed = await trimVideo(blob, fd.mediaT[from], fd.mediaT[to]).catch(() => null);
+        if (trimmed) {
+          await putVideo(session.video.storageKey, trimmed.blob);
+          saved = sliceFrames(fd, from, to, trimmed.offset);
+          phases = shiftPhases(res.phases, from, saved.n);
+          video = {
+            ...session.video,
+            durationSec: trimmed.durationSec,
+            trimStart: saved.mediaT[0],
+            trimEnd: saved.mediaT[saved.n - 1],
+          };
+        }
+      }
+
       const saving = saveSession(
         {
           ...session,
-          phases: res.phases,
+          video,
+          phases,
           phasesManual: false,
           calibration: res.calibration,
           metrics: res.metrics,
           thumbnail,
           modelVersions: out.modelVersions,
         },
-        fd,
+        saved,
       );
       // 儲存不應超過數秒；萬一瀏覽器的儲存空間沒有回應，顯示錯誤而不是一直停在「儲存中」
       const ok = await withTimeout(saving.then(() => true), 60000, false);

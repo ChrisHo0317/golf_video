@@ -425,12 +425,16 @@ export default function ViewerPage() {
           )}
         </div>
 
+        {/* 進度條緊接在影片下方，播放鍵放在右側 */}
+        <div className="player-bar">
+          <Timeline n={fd.n} frame={frame} phases={result.phases} onSeek={seekFrame} />
+          <button className="btn primary icon-btn play-btn" onClick={togglePlay} aria-label="play">
+            {playing ? <IconPause /> : <IconPlay />}
+          </button>
+        </div>
         <div className="controls">
           <button className="btn icon-btn" onClick={() => seekFrame(frame - 1)} aria-label="prev">
             <IconPrev />
-          </button>
-          <button className="btn primary icon-btn" onClick={togglePlay} aria-label="play">
-            {playing ? <IconPause /> : <IconPlay />}
           </button>
           <button className="btn icon-btn" onClick={() => seekFrame(frame + 1)} aria-label="next">
             <IconNext />
@@ -447,7 +451,6 @@ export default function ViewerPage() {
           </span>
         </div>
         {videoError && <div className="notice error">{videoError}</div>}
-        <Timeline n={fd.n} frame={frame} phases={result.phases} onSeek={seekFrame} />
         <div className="phase-jumps">
           {phasesKeys.map((k) => (
             <button key={k} className={`btn small ${frame === result.phases[k] ? 'active' : ''}`} onClick={() => seekFrame(result.phases[k])}>
