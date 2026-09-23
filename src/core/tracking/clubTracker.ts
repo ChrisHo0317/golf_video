@@ -71,6 +71,13 @@ const SLOW_PIN_RELAX = 0.8;
 const Q_LEN = 400;
 /** 前後量測的角度差超過此值時，視為桿頭在畫面上穿過手部附近 */
 const BIG_TURN = 100 * DEG;
+/** 投影後桿長短於此比例時，視為桿身指向鏡頭 */
+const FORESHORTENED_L = 0.7;
+/** 上述情況下角度成本的上限 */
+const AMBIG_TURN_COST = 1.2;
+/** 模型候選（直接認出桿頭）相對影像桿身偵測的優先權，以及開始給優先權的信心門檻 */
+const MODEL_BONUS = 1;
+const MODEL_TRUST_MIN = 0.3;
 /** 局部軌跡預測：前後各取幾格、權重的高斯尺度（格）、判定偵測失誤的容許值 */
 const FIT_HALF = 4;
 const FIT_SIGMA = 2.5;
@@ -285,8 +292,10 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     let removed = 0;
     for (let f = 0; f < n; f++) {
       if (Number.isNaN(zPsi[f]) || measSrc[f] === ClubSource.Manual) continue;
-      // 非常清晰的偵測已通過路徑連續性檢查，不因慣性模型跟不上而剔除
-      if (selConf[f] >= 0.75 || bigTurnAround(f)) continue;
+      // 非常清晰的偵測已通過路徑連續性檢查，不因慣性模型跟不上而剔除；
+      // 模型是直接認出桿頭（不是由桿身推算），門檻放寬
+      const trusted = measSrc[f] === ClubSource.Model ? 0.55 : 0.75;
+      if (selConf[f] >= trusted || bigTurnAround(f)) continue;
       const r = residual(f);
       if (r.z > 3 && r.abs > 15 * DEG) {
         zPsi[f] = NaN;
@@ -480,7 +489,14 @@ function selectPath(
   const bestAnyK = new Int32Array(n).fill(-1);
 
   // 對數概似比：信心值高於 0.3 為獎勵、低於則為懲罰（相對於略過該格）
-  const emission = (c: Cand) => (c.src === ClubSource.Manual ? -50 : -2 * Math.log(Math.max(c.conf, 0.05) / 0.3) * w);
+  // 模型是直接認出桿頭，影像桿身偵測是由桿身末端推得（常落在桿頸、偏短），因此模型優先
+  const emission = (c: Cand) => {
+    if (c.src === ClubSource.Manual) return -50;
+    // 模型信心低時不給優先權：低分的模型偵測常常是抓到別的東西
+    const trust = Math.min(1, Math.max(0, (c.conf - MODEL_TRUST_MIN) / 0.3));
+    const bonus = c.src === ClubSource.Model ? MODEL_BONUS * trust * w : 0;
+    return -2 * Math.log(Math.max(c.conf, 0.05) / 0.3) * w - bonus;
+  };
   // 手腕角超過 150° 幾乎不可能
   const prior = (c: Cand) => {
     const over = Math.abs(c.psi) - 150 * DEG;
@@ -547,6 +563,9 @@ function selectPath(
           const dArm = arm[f] - arm[f - g];
           // 接近半圈時正負方向無法分辨，兩個方向都可能
           const ambiguous = Math.abs(dTheta) > 150 * DEG;
+          // 桿身指向鏡頭時（投影後的桿長很短），桿頭會在畫面上從手部附近穿過，
+          // 角度一格就翻轉近半圈；此時角度不具參考性，成本封頂避免整格被略過
+          if (ambiguous && Math.min(c.r, p.r) < FORESHORTENED_L * L) smooth = Math.min(smooth, AMBIG_TURN_COST);
           if (!ambiguous && Math.abs(dTheta) > 30 * DEG && Math.abs(dArm) > 10 * DEG && Math.sign(dTheta) !== Math.sign(dArm)) smooth += 3;
           const cost = base + miss + smooth * w;
           if (cost < bestCost) {
@@ -684,14 +703,24 @@ function localPathFix(cands: Cand[][], selected: Int32Array, hands: Pt[], arm: F
     if (p.step > FIT_MAX_STEP_L * L || p.rms > FIT_MAX_RMS_L * L) continue;
     const px = p.x + hands[f].x;
     const py = p.y + hands[f].y;
-    if (cur) {
-      const d = Math.hypot(cur.x - px, cur.y - py);
-      // 容許值隨擬合殘差與這段的移動量放大，避免把正常的快速移動當成失誤
-      if (d <= Math.max(FIT_TOL_L * L, FIT_TOL_K * p.rms, FIT_TOL_STEP * p.step)) continue;
-      out[f] = makeCand(px, py, hands[f], arm[f], Math.min(cur.conf, FIT_CONF), cur.src);
-    } else {
-      out[f] = makeCand(px, py, hands[f], arm[f], FIT_CONF, ClubSource.Predicted);
+    const distTo = (c: Cand) => Math.hypot(c.x - px, c.y - py);
+    // 容許值隨擬合殘差與這段的移動量放大，避免把正常的快速移動當成失誤
+    const tol = Math.max(FIT_TOL_L * L, FIT_TOL_K * p.rms, FIT_TOL_STEP * p.step);
+    if (cur && distTo(cur) <= tol) continue;
+    // 這一格的選擇可疑（或根本沒選到）：先看同一格有沒有貼近預測軌跡的其他候選，
+    // 信心低但位置對的偵測常被信心高卻偏掉的候選壓過
+    let alt: Cand | null = null;
+    let altD = tol;
+    for (const c of cands[f]) {
+      const cd = distTo(c);
+      if (cd < altD) {
+        alt = c;
+        altD = cd;
+      }
     }
+    if (alt) out[f] = alt;
+    else if (cur) out[f] = makeCand(px, py, hands[f], arm[f], Math.min(cur.conf, FIT_CONF), cur.src);
+    else out[f] = makeCand(px, py, hands[f], arm[f], FIT_CONF, ClubSource.Predicted);
   }
   return out;
 }
