@@ -832,6 +832,8 @@ table.data td:first-child {
   background: var(--bg);
   padding-bottom: 10px;
   margin-bottom: -2px;
+  /* 以細線分隔，不用大範圍陰影，避免頂端看起來霧霧的 */
+  box-shadow: 0 1px 0 var(--border);
 }
 
 .upload-stage .preview-canvas {
@@ -839,7 +841,8 @@ table.data td:first-child {
 }
 
 .upload-stage .card {
-  box-shadow: var(--shadow-float);
+  box-shadow: none;
+  border-color: var(--border);
 }
 
 .trim-time {

@@ -13,6 +13,8 @@ export interface ClubTrackOptions {
   interpGapSec?: number;
   /** 路徑選擇是否使用慣性外推（預設開啟） */
   useInertia?: boolean;
+  /** 是否以前後數格的局部軌跡修正偵測失誤（預設開啟） */
+  pathFit?: boolean;
   /** 有慣性歷史時，非慣性運動模型的額外成本 */
   inertiaBias?: number;
 }
@@ -69,6 +71,18 @@ const SLOW_PIN_RELAX = 0.8;
 const Q_LEN = 400;
 /** 前後量測的角度差超過此值時，視為桿頭在畫面上穿過手部附近 */
 const BIG_TURN = 100 * DEG;
+/** 局部軌跡預測：前後各取幾格、權重的高斯尺度（格）、判定偵測失誤的容許值 */
+const FIT_HALF = 4;
+const FIT_SIGMA = 2.5;
+const FIT_TOL_L = 0.07;
+const FIT_TOL_K = 4;
+const FIT_TOL_STEP = 0.8;
+/** 局部每格移動量超過此值（相對桿長）就不做修正：轉向太快，曲線描述不了 */
+const FIT_MAX_STEP_L = 0.25;
+/** 擬合殘差超過此值（相對桿長）代表這段軌跡不符合曲線，預測不可信 */
+const FIT_MAX_RMS_L = 0.05;
+/** 以預測值取代或補上的量測信心 */
+const FIT_CONF = 0.45;
 /** 桿頭最大移動速度（手到桿頭距離 / 秒）：擊球瞬間 30fps 下一格可移動超過 1.5 倍桿長 */
 const MAX_HEAD_SPEED_L = 72;
 
@@ -199,6 +213,9 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   const speedNorm = Float64Array.from(handSpeed, (v) => (Number.isFinite(v) ? v / maxHandSpeed : 0));
   const selected = selectPath(cands, arm, speedNorm, t, fps, w, L, opt.useInertia ?? true, opt.inertiaBias ?? INERTIA_BIAS);
 
+  // ---- 以前後數格的局部軌跡預測，修正單格偵測失誤並補上漏偵測 ----
+  const picked = opt.pathFit === false ? cands.map((list, f) => (selected[f] >= 0 ? list[selected[f]] : null)) : localPathFix(cands, selected, hands, arm, t, L);
+
   // ---- 量測序列（角度沿路徑連續化） ----
   const zPsi = new Float64Array(n).fill(NaN);
   const rPsi = new Float64Array(n).fill(NaN);
@@ -213,9 +230,8 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
   let prevTheta = NaN;
   let prevF = -1;
   for (let f = 0; f < n; f++) {
-    const k = selected[f];
-    if (k < 0) continue;
-    const c = cands[f][k];
+    const c = picked[f];
+    if (!c) continue;
     const psi = Number.isNaN(prevPsi) ? c.psi : prevPsi + wrap(c.psi - prevPsi);
     prevPsi = psi;
     // 絕對角度連續化：轉動超過 120° 時，方向依手臂旋轉方向決定
@@ -633,4 +649,123 @@ function handEstimateOnly(fd: FrameData, opt: ClubTrackOptions, hands: Pt[], L: 
     club[f * 2 + 1] = (hands[f].y + Math.sin(a) * L * 0.9) / H;
   }
   return { club, clubSource: src, lengthPx: L, coverage: 0 };
+}
+
+/**
+ * 以前後各數格的局部軌跡（加權二次擬合，相對雙手的座標）預測每一格的桿頭位置：
+ *  - 這一格的偵測偏離預測太多 → 視為誤判，改用預測值（信心調低，後續平滑不會硬鎖在上面）
+ *  - 這一格沒有偵測到 → 以預測值補上（需前後都有資料，才不會變成外插）
+ * 用途是避免單格辨識失敗或跳到別的物體時，軌跡出現大幅偏移。
+ */
+function localPathFix(cands: Cand[][], selected: Int32Array, hands: Pt[], arm: Float64Array, t: Float64Array, L: number): (Cand | null)[] {
+  const n = cands.length;
+  const picked: (Cand | null)[] = new Array(n).fill(null);
+  for (let f = 0; f < n; f++) {
+    const k = selected[f];
+    picked[f] = k >= 0 ? cands[f][k] : null;
+  }
+  // 相對雙手的座標：扣掉身體與鏡頭的移動後，軌跡才接近平滑的弧線
+  const rx = new Float64Array(n).fill(NaN);
+  const ry = new Float64Array(n).fill(NaN);
+  for (let f = 0; f < n; f++) {
+    const c = picked[f];
+    if (!c) continue;
+    rx[f] = c.x - hands[f].x;
+    ry[f] = c.y - hands[f].y;
+  }
+
+  const out: (Cand | null)[] = picked.slice();
+  for (let f = 0; f < n; f++) {
+    const cur = picked[f];
+    if (cur?.src === ClubSource.Manual) continue;
+    const p = fitAround(rx, ry, picked, t, f);
+    if (!p) continue;
+    // 高速段（例如下桿）或擬合本身就對不上時，局部曲線不可信，交給原本的慣性模型
+    if (p.step > FIT_MAX_STEP_L * L || p.rms > FIT_MAX_RMS_L * L) continue;
+    const px = p.x + hands[f].x;
+    const py = p.y + hands[f].y;
+    if (cur) {
+      const d = Math.hypot(cur.x - px, cur.y - py);
+      // 容許值隨擬合殘差與這段的移動量放大，避免把正常的快速移動當成失誤
+      if (d <= Math.max(FIT_TOL_L * L, FIT_TOL_K * p.rms, FIT_TOL_STEP * p.step)) continue;
+      out[f] = makeCand(px, py, hands[f], arm[f], Math.min(cur.conf, FIT_CONF), cur.src);
+    } else {
+      out[f] = makeCand(px, py, hands[f], arm[f], FIT_CONF, ClubSource.Predicted);
+    }
+  }
+  return out;
+}
+
+/** 以 (f−FIT_HALF, f+FIT_HALF) 內的其他格做加權二次擬合，回傳這一格的預測位置與擬合殘差 */
+function fitAround(rx: Float64Array, ry: Float64Array, picked: (Cand | null)[], t: Float64Array, f: number) {
+  const ts: number[] = [];
+  const xs: number[] = [];
+  const ys: number[] = [];
+  const ws: number[] = [];
+  let before = 0;
+  let after = 0;
+  for (let g = Math.max(0, f - FIT_HALF); g <= Math.min(picked.length - 1, f + FIT_HALF); g++) {
+    if (g === f || !picked[g] || Number.isNaN(rx[g])) continue;
+    const d = g - f;
+    ts.push(t[g] - t[f]);
+    xs.push(rx[g]);
+    ys.push(ry[g]);
+    ws.push(Math.max(picked[g]!.conf, 0.1) * Math.exp(-(d * d) / (2 * FIT_SIGMA * FIT_SIGMA)));
+    if (d < 0) before++;
+    else after++;
+  }
+  // 前後都要有資料，否則是外插，不可信
+  if (!before || !after || ts.length < 3) return null;
+  // 這段時間內桿頭每格移動多少：下桿時一格可移動超過一個桿長，
+  // 二次曲線描述不了那麼劇烈的轉向，這種區段不做修正
+  const steps: number[] = [];
+  for (let i = 1; i < ts.length; i++) steps.push(Math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]));
+  steps.sort((a, b) => a - b);
+  const step = steps.length ? steps[steps.length >> 1] : 0;
+  const deg = ts.length >= 4 ? 2 : 1;
+  const fx = polyFit(ts, xs, ws, deg);
+  const fy = polyFit(ts, ys, ws, deg);
+  if (!fx || !fy) return null;
+  let se = 0;
+  let sw = 0;
+  for (let i = 0; i < ts.length; i++) {
+    const ex = polyAt(fx, ts[i]) - xs[i];
+    const ey = polyAt(fy, ts[i]) - ys[i];
+    se += ws[i] * (ex * ex + ey * ey);
+    sw += ws[i];
+  }
+  return { x: fx[0], y: fy[0], rms: Math.sqrt(se / Math.max(sw, 1e-6)), step };
+}
+
+/** 加權最小平方多項式擬合（次數 1 或 2），以高斯消去法解正規方程 */
+function polyFit(ts: number[], vs: number[], ws: number[], deg: number): number[] | null {
+  const m = deg + 1;
+  const A: number[][] = Array.from({ length: m }, () => new Array(m + 1).fill(0));
+  for (let i = 0; i < ts.length; i++) {
+    const pw = [1, ts[i], ts[i] * ts[i]];
+    for (let r = 0; r < m; r++) {
+      for (let c = 0; c < m; c++) A[r][c] += ws[i] * pw[r] * pw[c];
+      A[r][m] += ws[i] * pw[r] * vs[i];
+    }
+  }
+  for (let col = 0; col < m; col++) {
+    let piv = col;
+    for (let r = col + 1; r < m; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+    if (Math.abs(A[piv][col]) < 1e-9) return null;
+    [A[col], A[piv]] = [A[piv], A[col]];
+    for (let r = 0; r < m; r++) {
+      if (r === col) continue;
+      const k = A[r][col] / A[col][col];
+      for (let c = col; c <= m; c++) A[r][c] -= k * A[col][c];
+    }
+  }
+  return A.map((row, r) => row[m] / row[r]);
+}
+
+const polyAt = (c: number[], x: number) => c.reduce((s, v, i) => s + v * x ** i, 0);
+
+/** 由座標組出候選（角度、長度隨之重算） */
+function makeCand(x: number, y: number, hand: Pt, armAngle: number, conf: number, src: number): Cand {
+  const theta = Math.atan2(y - hand.y, x - hand.x);
+  return { x, y, theta, psi: wrap(theta - armAngle), r: Math.hypot(x - hand.x, y - hand.y), conf, oof: false, head: false, src };
 }
