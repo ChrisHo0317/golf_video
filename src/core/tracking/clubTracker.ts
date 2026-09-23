@@ -65,6 +65,8 @@ const SMOOTH_LEN_FAST = 0.02;
 const SMOOTH_LEN_SLOW = 0.08;
 /** 找到桿頭的格保留自身長度的權重 */
 const LEN_ANCHOR = 8;
+/** 平滑時間窗內允許的桿頭移動量（相對手到桿頭距離） */
+const SMOOTH_MAX_DISP_L = 0.15;
 /** 慢速段降低量測自身權重的比例 */
 const SLOW_PIN_RELAX = 0.8;
 /** 桿長比例的過程雜訊強度 */
@@ -434,6 +436,14 @@ export function trackClub(fd: FrameData, opt: ClubTrackOptions): ClubTrackResult
     slowness[f] = slow;
     sigA[f] = SMOOTH_ANGLE_FAST + (SMOOTH_ANGLE_SLOW - SMOOTH_ANGLE_FAST) * slow;
     sigL[f] = SMOOTH_LEN_FAST + (SMOOTH_LEN_SLOW - SMOOTH_LEN_FAST) * slow;
+    // 平滑的時間窗內桿頭不該移動太遠，否則像擊球瞬間這種尖峰會被削平。
+    // 平滑強度若只用秒設定，120fps 影片等於跨兩格平滑（30fps 時不到半格）。
+    const a = Math.max(0, f - 1);
+    const b = Math.min(n - 1, f + 1);
+    const speed = Math.hypot(Math.cos(thetaF[b]) * rF[b] - Math.cos(thetaF[a]) * rF[a], Math.sin(thetaF[b]) * rF[b] - Math.sin(thetaF[a]) * rF[a]) / Math.max(t[b] - t[a], 1e-6);
+    const maxSig = (SMOOTH_MAX_DISP_L * L) / Math.max(speed, 1e-6);
+    sigA[f] = Math.min(sigA[f], maxSig);
+    sigL[f] = Math.min(sigL[f], maxSig);
   }
   // 慢速段：前後格幾乎相同，量測雜訊靠平滑消除（降低自身權重）；高速段：前後格差異大，以量測為準
   for (let f = 0; f < n; f++) {

@@ -5,6 +5,7 @@
  * 只改追蹤器時不必重跑推論：await m.restoreAll(); m.evaluateAll();
  */
 import { runInference } from '../core/inference/runInference';
+import { probeVideo } from '../core/video/probe';
 import { LM, dist, handsCenter, lm, mid, shoulderCenter } from '../core/landmarks';
 import { analyze } from '../core/pipeline';
 import { smoothPose } from '../core/tracking/poseSmoothing';
@@ -49,8 +50,15 @@ export const VIDEOS: { name: string; duration: number; w: number; h: number; fps
   { name: '6582dbce-84f2-42b2-bbc0-a819728f9a56', duration: 4.387, w: 2160, h: 3840, fps: 60 },
   { name: '20260920_164245', duration: 5.767, w: 1080, h: 1920, fps: 60, ext: 'MP4' },
   { name: '20260920_164303', duration: 6.833, w: 1080, h: 1920, fps: 60, ext: 'MP4' },
+  { name: 'IMG_6974', duration: 3.852, w: 2160, h: 3840, fps: 60, ext: 'MOV' },
+  { name: 'IMG_6975', duration: 4.419, w: 1080, h: 1920, fps: 120, ext: 'MOV' },
+  { name: 'IMG_6978', duration: 5.303, w: 1080, h: 1920, fps: 120, ext: 'MOV' },
 ];
+// 實際尺寸以 probeVideo 為準（旋轉後），推論過一次就會記錄下來
+const sizes = new Map<string, { W: number; H: number }>();
 const sizeOf = (name: string) => {
+  const s = sizes.get(name);
+  if (s) return s;
   const v = VIDEOS.find((x) => x.name === name)!;
   return { W: v.w, H: v.h };
 };
@@ -72,19 +80,22 @@ async function labelsOf(name: string): Promise<EvalLabel[] | null> {
 export async function infer(name: string): Promise<FrameData> {
   const v = VIDEOS.find((x) => x.name === name)!;
   const file = await (await fetch(`/00_data/${name}.${v.ext ?? 'mp4'}`)).blob();
+  // 與 App 相同：由檔案本身取得尺寸、影格率與旋轉角（iPhone 影片常帶 90° 旋轉）
+  const p = await probeVideo(file);
   const video: VideoMeta = {
     storageKey: 'eval',
-    fileName: `${name}.mp4`,
-    mimeType: 'video/mp4',
-    durationSec: v.duration,
-    fps: v.fps,
-    width: v.w,
-    height: v.h,
-    rotation: 0,
+    fileName: `${name}.${v.ext ?? 'mp4'}`,
+    mimeType: v.ext === 'MOV' ? 'video/quicktime' : 'video/mp4',
+    durationSec: p.durationSec || v.duration,
+    fps: Math.round(p.fps) || v.fps,
+    width: p.width,
+    height: p.height,
+    rotation: p.rotation,
     slowMoFactor: 1,
     trimStart: 0,
-    trimEnd: v.duration,
+    trimEnd: p.durationSec || v.duration,
   };
+  sizes.set(name, { W: p.width, H: p.height });
   const out = await runInference(file, video, { poseModel: 'full', stride: 1, maxSide: 960, onProgress: () => undefined });
   smoothPose(out.frames);
   cache.set(name, out.frames);
